@@ -1,0 +1,107 @@
+<?php
+
+/**
+ * @file
+ * Install diagnostics and cleanup for the AiFinPay connector.
+ */
+
+function aifinpay_requirements($phase): array {
+  if ($phase !== 'runtime') {
+    return [];
+  }
+  $site = \Drupal\aifinpay\Connect\SiteBinding::get();
+  $connected = preg_match('/^mrch_[a-z0-9_]{3,32}$/D', (string) ($site['merchant_id'] ?? '')) && strlen((string) ($site['secret'] ?? '')) >= 32;
+  $config = \Drupal::config('aifinpay.settings');
+  $mode = $config->get('enabled') ? (string) $config->get('mode') : 'OFF';
+  return ['aifinpay_status' => [
+    'title' => t('AiFinPay'),
+    'value' => $connected ? t('Connected as @merchant; mode @mode', ['@merchant' => $site['merchant_id'], '@mode' => $mode]) : t('Not connected'),
+    'description' => $connected ? '' : t('Paste a connect code from the AiFinPay dashboard at <a href=":url">AiFinPay settings</a>.', [':url' => \Drupal\Core\Url::fromRoute('aifinpay.settings')->toString()]),
+    'severity' => $connected ? REQUIREMENT_INFO : REQUIREMENT_WARNING,
+  ]];
+}
+
+function aifinpay_uninstall(): void {
+  \Drupal::queue('aifinpay_telemetry')->deleteQueue();
+  \Drupal::queue('aifinpay_gate_events')->deleteQueue();
+  \Drupal::state()->deleteMultiple(['aifinpay.connection', 'aifinpay.merchant_record']);
+}
+
+function aifinpay_schema(): array {
+  return ['aifinpay_actions' => [
+    'description' => 'Short-lived signed gateway action replay guard; no receipts or PII.',
+    'fields' => [
+      'action_hash' => ['type' => 'varchar', 'length' => 64, 'not null' => TRUE],
+      'expires' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+    ],
+    'primary key' => ['action_hash'],
+    'indexes' => ['expires' => ['expires']],
+  ], 'aifinpay_edge_nonces' => [
+    'description' => 'Short-lived hashes of consumed Edge nonces; no raw context or PII.',
+    'fields' => [
+      'nonce_hash' => ['type' => 'varchar', 'length' => 64, 'not null' => TRUE],
+      'expires' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+    ],
+    'primary key' => ['nonce_hash'],
+    'indexes' => ['expires' => ['expires']],
+  ], 'aifinpay_receipt_units' => [
+    'description' => 'Units spent per prepaid AIFP receipt (self-hosted gate); hashes only, no receipts or PII.',
+    'fields' => [
+      'receipt_hash' => ['type' => 'varchar', 'length' => 64, 'not null' => TRUE],
+      'used' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE, 'default' => 0],
+      'expires' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+    ],
+    'primary key' => ['receipt_hash'],
+    'indexes' => ['expires' => ['expires']],
+  ]];
+}
+
+function aifinpay_update_11001(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('aifinpay_actions')) {
+    $schema->createTable('aifinpay_actions', aifinpay_schema()['aifinpay_actions']);
+  }
+}
+
+function aifinpay_update_11002(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('aifinpay_edge_nonces')) {
+    $schema->createTable('aifinpay_edge_nonces', aifinpay_schema()['aifinpay_edge_nonces']);
+  }
+}
+
+function aifinpay_update_11003(): void {
+  $config = \Drupal::configFactory()->getEditable('aifinpay.settings');
+  foreach (['discovery_link', 'discovery_documents'] as $key) {
+    if ($config->get($key) === NULL) {
+      $config->set($key, TRUE);
+    }
+  }
+  $config->save();
+}
+
+function aifinpay_update_11004(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('aifinpay_receipt_units')) {
+    $schema->createTable('aifinpay_receipt_units', aifinpay_schema()['aifinpay_receipt_units']);
+  }
+  $config = \Drupal::configFactory()->getEditable('aifinpay.settings');
+  if ($config->get('tier') === NULL) {
+    $config->set('tier', 'standard');
+  }
+  if ($config->get('exempt_humans') === NULL) {
+    $config->set('exempt_humans', FALSE);
+  }
+  $config->save();
+}
+
+function aifinpay_cron(): void {
+  $site = \Drupal\aifinpay\Connect\SiteBinding::get();
+  if (($site['credential_source'] ?? '') === 'connect_code') {
+    \Drupal::service('aifinpay.merchant_record')->get($site, TRUE);
+  }
+  \Drupal::database()->delete('aifinpay_edge_nonces')->condition('expires', time(), '<')->execute();
+  \Drupal::database()->delete('aifinpay_actions')->condition('expires', time(), '<')->execute();
+  \Drupal::database()->delete('aifinpay_receipt_units')->condition('expires', time(), '<')->execute();
+}
+

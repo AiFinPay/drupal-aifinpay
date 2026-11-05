@@ -1,0 +1,9 @@
+name: AiFinPay
+type: module
+description: 'Lets AI agents pay for protected pages with AiFinPay. Shadow by default; charging needs approval from AiFinPay.'
+package: AiFinPay
+core_version_requirement: ^11
+php: 8.3
+configure: aifinpay.settings
+dependencies:
+  - drupal:system

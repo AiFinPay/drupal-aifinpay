@@ -1,0 +1,7 @@
+aifinpay.settings:
+  path: '/admin/config/services/aifinpay'
+  defaults:
+    _form: '\Drupal\aifinpay\Form\SettingsForm'
+    _title: 'AiFinPay'
+  requirements:
+    _permission: 'administer aifinpay'

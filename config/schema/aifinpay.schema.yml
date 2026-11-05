@@ -1,0 +1,33 @@
+aifinpay.settings:
+  type: config_object
+  label: 'AiFinPay configuration'
+  mapping:
+    enabled: { type: boolean, label: 'Enabled' }
+    mode: { type: string, label: 'Mode' }
+    environment: { type: string, label: 'Environment' }
+    merchant_id: { type: string, label: 'Merchant ID' }
+    site_id: { type: string, label: 'Site ID' }
+    api_endpoint: { type: string, label: 'API endpoint' }
+    secret_reference: { type: string, label: 'Credential reference (never credential)' }
+    protected_paths:
+      type: sequence
+      label: 'Protected paths'
+      sequence: { type: string }
+    allowed_paths:
+      type: sequence
+      label: 'Allowed paths'
+      sequence: { type: string }
+    excluded_paths:
+      type: sequence
+      label: 'Excluded paths'
+      sequence: { type: string }
+    pricing_policy: { type: string, label: 'Pricing policy' }
+    verification: { type: string, label: 'Verification adapter' }
+    logging_level: { type: string, label: 'Logging level' }
+    telemetry_enabled: { type: boolean, label: 'Telemetry enabled' }
+    telemetry_sample: { type: integer, label: 'Sample percentage' }
+    report_gate_events: { type: boolean, label: 'Report agent requests on protected paths to AiFinPay' }
+    discovery_link: { type: boolean, label: 'Link header to /llms.txt and /.well-known/x402.json on HTML pages' }
+    discovery_documents: { type: boolean, label: 'Serve /llms.txt and /.well-known/x402.json from this configuration' }
+    tier: { type: string, label: 'Price tier of protected paths (self-hosted gate)' }
+    exempt_humans: { type: boolean, label: 'Serve requests that do not identify as an agent without payment (self-hosted gate)' }

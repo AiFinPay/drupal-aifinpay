@@ -1,0 +1,3 @@
+administer aifinpay:
+  title: 'Administer AiFinPay connector'
+  restrict access: true

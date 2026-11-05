@@ -1,0 +1,4 @@
+aifinpay.settings:
+  title: 'AiFinPay'
+  parent: system.admin_config_services
+  route_name: aifinpay.settings

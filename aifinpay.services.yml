@@ -1,0 +1,28 @@
+services:
+  aifinpay.middleware:
+    class: Drupal\aifinpay\Middleware\PaymentMiddleware
+    arguments: ['@config.factory', '@http_client', '@queue', '@logger.factory', '@aifinpay.hosted_gateway', '@aifinpay.edge_replay', '@aifinpay.receipt_gate', '@aifinpay.merchant_record']
+    tags:
+      - { name: http_middleware, priority: 250 }
+  aifinpay.transport:
+    class: Drupal\aifinpay\Protocol\Transport
+    arguments: ['@http_client']
+  aifinpay.hosted_gateway:
+    class: Drupal\aifinpay\Protocol\HostedGateway
+    arguments: ['@aifinpay.transport', '@cache.default', '@database']
+  aifinpay.merchant_record:
+    class: Drupal\aifinpay\Connect\MerchantRecord
+    arguments: ['@aifinpay.transport', '@cache.default', '@state']
+  aifinpay.receipt_gate:
+    class: Drupal\aifinpay\Protocol\ReceiptGate
+    arguments: ['@aifinpay.transport', '@cache.default', '@database']
+  aifinpay.cache_policy:
+    class: Drupal\aifinpay\Policy\NoPaidCache
+    arguments: ['@config.factory']
+    tags:
+      - { name: page_cache_request_policy }
+      - { name: dynamic_page_cache_request_policy }
+
+  aifinpay.edge_replay:
+    class: Drupal\aifinpay\Protocol\EdgeReplayGuard
+    arguments: ['@database']
