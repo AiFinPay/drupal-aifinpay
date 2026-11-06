@@ -84,12 +84,22 @@ final class ReceiptGate {
       if ($resource === '/' || $path === $resource) {
         return TRUE;
       }
-      return str_starts_with($path, str_ends_with($resource, '/') ? $resource : $resource . '/');
+      $boundary = str_ends_with($resource, '/') ? $resource : $resource . '/';
+      // The SDKs buy "/paid/" for a "/paid/*" 402, and that wildcard covers "/paid" itself.
+      return $path === substr($boundary, 0, -1) || str_starts_with($path, $boundary);
     }
     if (!str_ends_with($resource, '/*')) {
       return $path === $resource;
     }
     return $path === substr($resource, 0, -2) || str_starts_with($path, substr($resource, 0, -1));
+  }
+
+  /**
+   * Drupal's router answers /PAID/a and /paid/a/ as one page, and the receipt was bought for that page.
+   */
+  public static function receiptCovers(mixed $scope, mixed $resource, string $requestPath): bool {
+    $page = static fn(string $path): string => rtrim(strtolower($path), '/') ?: '/';
+    return self::scopeCovers($scope, is_string($resource) ? $page($resource) : $resource, $page($requestPath));
   }
 
   /**
@@ -225,7 +235,7 @@ final class ReceiptGate {
       return $forbid('receipt carries no receipt_id and cannot be metered');
     }
     $path = $request->getPathInfo();
-    if (!self::scopeCovers($p['scope'] ?? NULL, $p['resource'] ?? NULL, $path)) {
+    if (!self::receiptCovers($p['scope'] ?? NULL, $p['resource'] ?? NULL, $path)) {
       return $forbid('receipt is scoped to ' . (is_string($p['resource'] ?? NULL) ? $p['resource'] : '?') . ' (' . (is_string($p['scope'] ?? NULL) && $p['scope'] !== '' ? $p['scope'] : 'exact') . '), not ' . $path);
     }
     // A payer-bound batch is spent only by the agent that paid for it.

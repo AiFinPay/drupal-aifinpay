@@ -1,32 +1,25 @@
 {
-    "name": "aifinpay/drupal-connector",
-    "description": "AiFinPay for Drupal: AI agents pay for protected pages (HTTP 402); prepaid receipts are verified on your site.",
-    "type": "drupal-module",
-    "license": "GPL-2.0-or-later",
-    "keywords": [
-        "drupal",
-        "ai agents",
-        "payments",
-        "paywall",
-        "http 402",
-        "x402"
-    ],
-    "homepage": "https://aifinpay.io",
-    "support": {
-        "issues": "https://github.com/AiFinPay/drupal-aifinpay/issues",
-        "source": "https://github.com/AiFinPay/drupal-aifinpay"
-    },
-    "require": {
-        "php": "^8.3",
-        "drupal/core": "^11",
-        "ext-sodium": "*"
-    },
-    "autoload": {
-        "psr-4": {
-            "Drupal\\aifinpay\\": "src/"
-        }
-    },
-    "extra": {
-        "installer-name": "aifinpay"
+  "name": "aifinpay/drupal-connector",
+  "description": "AiFinPay for Drupal: AI agents pay for protected pages (HTTP 402); prepaid receipts are verified on your site.",
+  "type": "drupal-module",
+  "license": "GPL-2.0-or-later",
+  "keywords": ["drupal", "ai agents", "payments", "paywall", "http 402", "x402"],
+  "homepage": "https://aifinpay.io",
+  "support": {
+    "issues": "https://github.com/AiFinPay/drupal-aifinpay/issues",
+    "source": "https://github.com/AiFinPay/drupal-aifinpay"
+  },
+  "require": {
+    "php": "^8.3",
+    "drupal/core": "^11",
+    "ext-sodium": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "Drupal\\aifinpay\\": "src/"
     }
+  },
+  "extra": {
+    "installer-name": "aifinpay"
+  }
 }

@@ -21,7 +21,7 @@ drush en aifinpay
 
 ## Connect
 
-1. In the AiFinPay dashboard open your site, then **Settings → API keys →
+1. In the AiFinPay dashboard open your site, then **Profile & keys → API keys →
    Connect a CMS site**, and copy the connect code. It works once and expires
    after ten minutes.
 2. In Drupal open **Configuration → Web services → AiFinPay**

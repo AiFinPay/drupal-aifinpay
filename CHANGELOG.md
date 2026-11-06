@@ -1,6 +1,18 @@
 # Changelog
 
-## 1.0.0 — unreleased
+## 1.0.1
+
+- A protected path now matches in any case and with a trailing slash. Drupal's
+  router serves `/PAID/a` and `/paid/` as the same page, so those spellings were
+  served free in Enforce and went uncounted in Shadow.
+- A `/x/*` pattern now covers `/x` itself, as in `@aifinpay/gate` and the WordPress
+  plugin. It covered only what is under `/x/`, so the section page was free.
+- A receipt covers the page in any spelling the router serves: `/PAID/a` and
+  `/paid/a/` answered 403 after the agent had paid. A prefix receipt covers the
+  section page, as in `@aifinpay/gate` 0.9.1: the SDKs buy `/paid/` for a `/paid/*`
+  402, and `/paid` answered 403.
+
+## 1.0.0
 
 First public release.
 
