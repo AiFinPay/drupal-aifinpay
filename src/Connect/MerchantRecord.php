@@ -106,6 +106,9 @@ final class MerchantRecord {
       $site['production_approved'] ??= $approved && $live;
       $site['approval_source'] = 'merchant_record';
     }
+    if ($own && !array_key_exists('network_mode', $site)) {
+      $site['network_mode'] = $record['network_mode'];
+    }
     return $site;
   }
 

@@ -63,7 +63,9 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $mode = $config['mode'] ?? 'SHADOW';
     $path = $request->getPathInfo();
     $rule = Paths::protected($path, $config);
-    if ($mode === 'ENFORCE' && (preg_match('/%|\\\\|\/\.|\/\//', $path))) {
+    // Origins disagree on a dot segment, so no price is safe to quote. A reader still gets the page.
+    if ($mode === 'ENFORCE' && Paths::inspect($path)['ambiguous']
+      && (empty($config['exempt_humans']) || AgentIdentity::classify($request)['ua_class'] !== 'human')) {
       return $this->deny(400, 'noncanonical_path');
     }
     if ($rule === NULL) {
@@ -95,32 +97,43 @@ final class PaymentMiddleware implements HttpKernelInterface {
       // URL, not by agent) would answer the next agent itself, so the request
       // would never reach this middleware. Protected paths are never stored by
       // a shared cache, exactly as in ENFORCE; other paths are untouched.
-      $response->headers->set('Cache-Control', 'private, no-store, max-age=0');
+      $this->forbidStorage($response);
       // Without Edge, who asked comes from the request's own declaration (the
       // same table as @aifinpay/gate). The requester learns only what its own
       // User-Agent already says.
       $who = AgentIdentity::classify($request);
       $response->headers->set('X-AiFinPay-Agent', $who['operator'] . '; ' . $who['ua_class']);
-      if ($who['ua_class'] !== 'human') {
+      $wouldBe = $who['ua_class'] !== 'human' ? $this->shadowDecision($request, $config, $identity, $rule, $who) : NULL;
+      if ($wouldBe !== NULL && $wouldBe['status'] !== 200) {
         // What ENFORCE would have answered, as the gate SDK says it in shadow.
-        $response->headers->set('AIFP-Shadow-Status', '402');
+        $response->headers->set('AIFP-Shadow-Status', (string) $wouldBe['status']);
       }
       $this->record($config, $rule, 'shadow', $classification, $trace, $start, $edge);
-      // An agent on a protected path is what ENFORCE would have answered with a
-      // 402; report it exactly as the gate SDK does in shadow. Humans are not
+      // Report it exactly as the gate SDK does in shadow. Humans are not
       // reported: the report is about agent traffic.
-      if ($who['ua_class'] !== 'human') {
-        $this->reportGateEvent($config, $identity, $bound, $rule, $who);
+      if (isset($wouldBe['event'])) {
+        $event = $wouldBe['event'];
+        $this->reportGateEvent($config, $identity, $bound, $rule, $event, $event['kind'], (bool) ($event['verified'] ?? FALSE));
       }
       return $response;
     }
 
-    // Bindings and approval apply before any HUMAN bypass, including gateway callbacks.
+    $receipt = ($config['verification'] ?? '') === 'receipt';
+    // The self-hosted gate serves a reader free whatever the answer below, so an outage or a
+    // pending approval stays the agents' problem. Edge decides who is a reader where it is required.
+    if ($receipt && !empty($config['exempt_humans']) && ($identity['edge_required'] ?? FALSE) !== TRUE
+      && AgentIdentity::classify($request)['ua_class'] === 'human') {
+      $response = $this->httpKernel->handle($request, $type, $catch);
+      $response->headers->set('AIFP-Paywall', 'exempt');
+      $this->forbidStorage($response);
+      $response->headers->set('X-AiFinPay-Trace', $trace);
+      return $response;
+    }
+
+    // Bindings and approval apply before any other HUMAN bypass, including gateway callbacks.
     $mock = ($config['verification'] ?? '') === 'mock' && ($identity['local_mock'] ?? FALSE) === TRUE
       && ($identity['environment'] ?? '') === 'local';
-    $receipt = ($config['verification'] ?? '') === 'receipt';
-    if ($receipt && $this->merchantRecord !== NULL
-      && (!array_key_exists('trusted_hosts', $identity) || !array_key_exists('receipt_gate_approved', $identity))) {
+    if ($receipt && $this->merchantRecord !== NULL && self::wantsRecord($identity)) {
       $identity = MerchantRecord::resolve($identity, $this->merchantRecord->get($identity));
     }
     if (!$bound || !in_array($request->getHost(), $identity['trusted_hosts'] ?? [], TRUE)
@@ -179,7 +192,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
           $response = $this->deny(503, 'gateway_unavailable');
         }
       }
-      $response->headers->set('Cache-Control', 'private, no-store, max-age=0');
+      $this->forbidStorage($response);
       $response->headers->set('X-AiFinPay-Trace', $trace);
       $this->record($config, $rule, 'hosted', $classification, $trace, $start, $edge);
       return $response;
@@ -249,10 +262,18 @@ final class PaymentMiddleware implements HttpKernelInterface {
       $this->loggerFactory->get('aifinpay')->warning('Adapter unavailable. Trace: @trace', ['@trace' => $trace]);
       $response = $this->deny(503, 'payment_service_unavailable');
     }
-    $response->headers->set('Cache-Control', 'private, no-store, max-age=0');
+    $this->forbidStorage($response);
     $response->headers->set('X-AiFinPay-Trace', $trace);
     $response->headers->set('Server-Timing', 'aifinpay;dur=' . round((hrtime(TRUE) - $start) / 1e6, 3));
     return $response;
+  }
+
+  /** The CDN headers outrank Cache-Control at the CDN they address, so they cannot stay beside it. */
+  private function forbidStorage(Response $response): void {
+    $response->headers->set('Cache-Control', 'private, no-store, max-age=0');
+    foreach (['CDN-Cache-Control', 'Surrogate-Control', 'Cloudflare-CDN-Cache-Control', 'Vercel-CDN-Cache-Control', 'Netlify-CDN-Cache-Control', 'Edge-Control', 'Akamai-Cache-Control', 'X-Accel-Expires'] as $name) {
+      $response->headers->remove($name);
+    }
   }
 
   /** ENFORCE with the self-hosted gate: 402, local receipt check, metering here. */
@@ -267,7 +288,9 @@ final class PaymentMiddleware implements HttpKernelInterface {
     }
     catch (\Throwable) {
       $this->loggerFactory->get('aifinpay')->warning('Receipt gate unavailable. Trace: @trace', ['@trace' => $trace]);
-      return $this->deny(503, 'payment_service_unavailable');
+      $denied = $this->deny(503, 'payment_service_unavailable');
+      $denied->headers->set('Retry-After', '30');
+      return $denied;
     }
     $response = $decision['status'] === 200
       ? $this->httpKernel->handle($request, $type, $catch)
@@ -275,7 +298,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     foreach ($decision['headers'] as $name => $value) {
       $response->headers->set($name, $value);
     }
-    $response->headers->set('Cache-Control', 'private, no-store, max-age=0');
+    $this->forbidStorage($response);
     $response->headers->set('X-AiFinPay-Trace', $trace);
     $this->logDecision($config, $decision, $rule, $trace);
     if ($decision['event'] !== NULL) {
@@ -283,6 +306,33 @@ final class PaymentMiddleware implements HttpKernelInterface {
       $this->reportGateEvent($config, $identity, $bound, $rule, $event, $event['kind'], (bool) ($event['verified'] ?? FALSE));
     }
     return $response;
+  }
+
+  private static function wantsRecord(array $identity): bool {
+    return !array_key_exists('trusted_hosts', $identity) || !array_key_exists('receipt_gate_approved', $identity)
+      || !array_key_exists('network_mode', $identity);
+  }
+
+  /**
+   * What ENFORCE would have answered an agent, for a site that is only watching.
+   * A receipt is verified as in ENFORCE and nothing is spent; a failure here never reaches the page.
+   */
+  private function shadowDecision(Request $request, array $config, array $identity, string $rule, array $who): array {
+    $unpaid = ['status' => 402, 'event' => ['kind' => '402'] + $who];
+    $tier = (string) ($config['tier'] ?? 'standard');
+    if (!$request->headers->get('AIFP-Receipt') || ($config['verification'] ?? '') !== 'receipt' || $this->receiptGate === NULL
+      || !isset(ReceiptGate::TIER_WEIGHTS[$tier]) || !preg_match('/^mrch_[a-z0-9_]{3,32}$/D', (string) ($identity['merchant_id'] ?? ''))) {
+      return $unpaid;
+    }
+    try {
+      if ($this->merchantRecord !== NULL && self::wantsRecord($identity)) {
+        $identity = MerchantRecord::resolve($identity, $this->merchantRecord->get($identity));
+      }
+      return $this->receiptGate->decide($request, $identity, $rule, $tier, FALSE, time(), FALSE);
+    }
+    catch (\Throwable) {
+      return ['status' => 503, 'event' => NULL];
+    }
   }
 
   /**
@@ -357,7 +407,11 @@ final class PaymentMiddleware implements HttpKernelInterface {
   }
 
   private function deny(int $status, string $error): Response {
-    return new JsonResponse(['error' => $error], $status, ['Cache-Control' => 'private, no-store, max-age=0']);
+    $headers = ['Cache-Control' => 'private, no-store, max-age=0'];
+    if ($status === 503) {
+      $headers['Retry-After'] = '60';
+    }
+    return new JsonResponse(['error' => $error], $status, $headers);
   }
 
   private function record(array $config, string $rule, string $kind, string $classification, string $trace, int $start, ?array $edge = NULL): void {

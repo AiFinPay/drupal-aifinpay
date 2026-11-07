@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\aifinpay\Protocol;
 
+use Drupal\aifinpay\Policy\Paths;
 use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\Database\IntegrityConstraintViolationException;
@@ -66,7 +67,7 @@ final class ReceiptGate {
         "POST $api/v1/quote {\"merchant_id\":\"$merchant\",\"resource\":\"$resource\",\"tier\":\"$tier\",\"scope\":\"exact\",\"requests\":$min,\"payer\":\"<your wallet address>\"} — payer is required; raise requests to buy more than the minimum batch; check amount, scope, expiry and payer before paying",
         'settle the quoted batch on-chain from your own wallet (order_id = quote_id)',
         "POST $api/v1/pay {quote_id, chain, asset, tx_ref, payment_authorization} + Idempotency-Key header -> quota receipt (wallet-signature-v1). Keep the quote until you hold the receipt; on a timeout retry with the same key and tx_ref — never pay again",
-        'retry this request with header: AIFP-Receipt: <receipt JWT>',
+        'retry this request with headers: AIFP-Receipt: <receipt JWT> and AIFP-Agent-Id: <the address that paid>',
       ],
       'no_wallet' => 'npx @aifinpay/mcp init — creates or selects a local wallet; read instructions_url for supported clients and payment availability. Wallet setup alone does not enable settlement.',
     ];
@@ -81,10 +82,12 @@ final class ReceiptGate {
       return TRUE;
     }
     if ($scope === 'prefix') {
-      if ($resource === '/' || $path === $resource) {
+      // A discovery document lists a section as "/x/*" with scope prefix.
+      $base = str_ends_with($resource, '/*') ? substr($resource, 0, -1) : $resource;
+      if ($base === '/' || $path === $base) {
         return TRUE;
       }
-      $boundary = str_ends_with($resource, '/') ? $resource : $resource . '/';
+      $boundary = str_ends_with($base, '/') ? $base : $base . '/';
       // The SDKs buy "/paid/" for a "/paid/*" 402, and that wildcard covers "/paid" itself.
       return $path === substr($boundary, 0, -1) || str_starts_with($path, $boundary);
     }
@@ -97,9 +100,8 @@ final class ReceiptGate {
   /**
    * Drupal's router answers /PAID/a and /paid/a/ as one page, and the receipt was bought for that page.
    */
-  public static function receiptCovers(mixed $scope, mixed $resource, string $requestPath): bool {
-    $page = static fn(string $path): string => rtrim(strtolower($path), '/') ?: '/';
-    return self::scopeCovers($scope, is_string($resource) ? $page($resource) : $resource, $page($requestPath));
+  public static function receiptCovers(mixed $scope, mixed $resource, string $requestPath, ?string $rule = NULL): bool {
+    return self::scopeCovers($scope, is_string($resource) ? Paths::spelled($resource) : $resource, $rule === NULL ? Paths::inspect($requestPath)['path'] : Paths::boughtAs($requestPath, $rule));
   }
 
   /**
@@ -128,10 +130,14 @@ final class ReceiptGate {
     return $p;
   }
 
-  /** EVM addresses compare without checksum case; Solana addresses exactly. */
-  public static function samePayer(string $payer, ?string $agent): bool {
+  /** EVM addresses compare without checksum case, Aptos with its padding; Solana addresses exactly. */
+  public static function samePayer(string $payer, ?string $agent, mixed $chain = NULL): bool {
     if ($agent === NULL || $agent === '') {
       return FALSE;
+    }
+    $aptos = '/^0x[0-9a-fA-F]+$/D';
+    if ($chain === 'aptos' && preg_match($aptos, $payer) && preg_match($aptos, $agent)) {
+      return str_pad(strtolower(substr($payer, 2)), 64, '0', STR_PAD_LEFT) === str_pad(strtolower(substr($agent, 2)), 64, '0', STR_PAD_LEFT);
     }
     $evm = '/^0x[0-9a-fA-F]{40}$/D';
     return preg_match($evm, $payer) && preg_match($evm, $agent) ? strtolower($payer) === strtolower($agent) : $payer === $agent;
@@ -196,7 +202,7 @@ final class ReceiptGate {
    *   status 200 means serve; `event` is the gate event to report, if any;
    *   `receipt` the spent receipt's ids on a paid read.
    */
-  public function decide(Request $request, array $site, string $rule, string $tier, bool $exemptHumans, int $now): array {
+  public function decide(Request $request, array $site, string $rule, string $tier, bool $exemptHumans, int $now, bool $spend = TRUE): array {
     $merchant = (string) ($site['merchant_id'] ?? '');
     $api = Transport::origin($site, 'api');
     $weight = self::TIER_WEIGHTS[$tier];
@@ -234,21 +240,36 @@ final class ReceiptGate {
     if (!is_string($p['receipt_id'] ?? NULL) || $p['receipt_id'] === '') {
       return $forbid('receipt carries no receipt_id and cannot be metered');
     }
+    // A test site takes test receipts and a live site live ones, whatever the signature says.
+    $paidOn = ($p['network_mode'] ?? NULL) === 'test' ? 'test' : 'live';
+    if (isset($site['network_mode']) && $paidOn !== $site['network_mode']) {
+      return $forbid('receipt was paid on another network than this site charges on');
+    }
     $path = $request->getPathInfo();
-    if (!self::receiptCovers($p['scope'] ?? NULL, $p['resource'] ?? NULL, $path)) {
+    if (!self::receiptCovers($p['scope'] ?? NULL, $p['resource'] ?? NULL, $path, $rule)) {
       return $forbid('receipt is scoped to ' . (is_string($p['resource'] ?? NULL) ? $p['resource'] : '?') . ' (' . (is_string($p['scope'] ?? NULL) && $p['scope'] !== '' ? $p['scope'] : 'exact') . '), not ' . $path);
     }
     // A payer-bound batch is spent only by the agent that paid for it.
     $payer = $p['payer'] ?? $p['sub'] ?? NULL;
     $agent = $request->headers->get('AIFP-Agent-Id');
-    if (is_string($payer) && $payer !== '' && !self::samePayer($payer, $agent)) {
-      return $forbid('AIFP-Agent-Id does not match the receipt payer');
+    if (is_string($payer) && $payer !== '' && !self::samePayer($payer, $agent, $p['chain'] ?? NULL)) {
+      return $forbid($agent === NULL || $agent === ''
+        ? 'this receipt is bound to the address that paid: retry with AIFP-Agent-Id set to it. Nothing was spent.'
+        : 'AIFP-Agent-Id does not match the receipt payer');
     }
-    $limit = isset($p['unit_quota']) && is_int($p['unit_quota'])
+    if (isset($p['unit_quota']) && !is_int($p['unit_quota'])) {
+      return $forbid('receipt carries no usable unit_quota');
+    }
+    $limit = isset($p['unit_quota'])
       ? $p['unit_quota']
       : (is_int($p['quota'] ?? NULL) && $p['quota'] > 0 ? $p['quota'] : 1) * (self::TIER_WEIGHTS[$p['tier'] ?? ''] ?? 1);
     if ($limit < 1) {
       return $forbid('receipt carries no spendable units');
+    }
+    // A shadow site promises not to touch money: the receipt is verified and reported, and nothing is spent.
+    if (!$spend) {
+      return ['status' => 200, 'body' => NULL, 'headers' => [],
+        'event' => ['kind' => 'serve', 'operator' => 'aifinpay', 'ua_class' => 'aifp_agent', 'verified' => TRUE]];
     }
     $used = $this->spend($merchant, $p['receipt_id'], $weight, $limit, $p['exp'] + self::CLOCK_TOLERANCE);
     if ($used === NULL) {

@@ -51,7 +51,8 @@ final class Discovery {
     $resources = [];
     foreach ($config['protected_paths'] ?? [] as $pattern) {
       if (is_string($pattern) && Paths::validPattern($pattern)) {
-        $resources[] = ['resource' => $pattern, 'scope' => str_ends_with($pattern, '/*') ? 'prefix' : 'exact'];
+        $resources[] = ['resource' => $pattern, 'scope' => str_ends_with($pattern, '/*') ? 'prefix' : 'exact']
+          + (in_array($config['tier'] ?? NULL, ['standard', 'complex', 'premium'], TRUE) ? ['tier' => $config['tier']] : []);
       }
     }
     return $resources;
