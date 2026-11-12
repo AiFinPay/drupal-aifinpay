@@ -60,7 +60,6 @@ final class ReceiptGate {
       'unit_price_usd' => self::UNIT_PRICE_USD[$tier],
       'min_requests' => $min,
       'scope' => 'exact',
-      'protocol_fee_bps' => 100,
       'no_minimum_fee' => TRUE,
       'settlement_terms_from' => "POST $api/v1/quote — returns accepted_chains, accepted_assets, amount, order_id and expiry",
       'how_to_pay' => [
