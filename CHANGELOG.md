@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The 402 no longer carries `protocol_fee_bps`. The fee is set per merchant and
+  stated by the quote, matching `@aifinpay/gate` 0.11.0.
+
 ## 1.0.2
 
 - A protected page drops `CDN-Cache-Control`, `Surrogate-Control`, `X-Accel-Expires` and
