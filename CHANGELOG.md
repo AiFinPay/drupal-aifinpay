@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3
 
 - The 402 no longer carries `protocol_fee_bps`. The fee is set per merchant and
   stated by the quote, matching `@aifinpay/gate` 0.11.0.
