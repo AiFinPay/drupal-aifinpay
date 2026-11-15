@@ -296,7 +296,8 @@ final class PaymentMiddleware implements HttpKernelInterface {
       ? $this->httpKernel->handle($request, $type, $catch)
       : new JsonResponse($decision['body'], $decision['status']);
     foreach ($decision['headers'] as $name => $value) {
-      $response->headers->set($name, $value);
+      // Link is added beside Drupal's own canonical and shortlink values.
+      $response->headers->set($name, $value, $name !== 'Link');
     }
     $this->forbidStorage($response);
     $response->headers->set('X-AiFinPay-Trace', $trace);

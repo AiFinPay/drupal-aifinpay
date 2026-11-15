@@ -104,6 +104,24 @@ final class ReceiptGate {
   }
 
   /**
+   * AIFP-License and Link rel="license" from a well-formed lic claim, else none.
+   *
+   * The URL is built from the API origin and merchant, never taken from the token.
+   */
+  public static function licenseHeaders(string $api, string $merchant, mixed $lic): array {
+    if (!is_array($lic) || !is_string($lic['id'] ?? NULL) || !preg_match('/^clic_[0-9a-f]{24}$/D', $lic['id'])
+      || !is_string($lic['sha256'] ?? NULL) || !preg_match('/^[0-9a-f]{64}$/D', $lic['sha256'])
+      || !is_int($lic['rev'] ?? NULL) || $lic['rev'] < 1) {
+      return [];
+    }
+    $url = rtrim($api, '/') . '/v1/merchants/' . rawurlencode($merchant) . '/license/' . $lic['rev'];
+    return [
+      'AIFP-License' => 'id=' . $lic['id'] . '; rev=' . $lic['rev'] . '; sha256=' . $lic['sha256'] . '; url="' . $url . '"',
+      'Link' => '<' . $url . '/text>; rel="license"',
+    ];
+  }
+
+  /**
    * Signature, issuer, audience and time, as jose.jwtVerify in the gate SDK.
    *
    * @throws \RuntimeException 'expired' or 'invalid'.
@@ -277,7 +295,7 @@ final class ReceiptGate {
     return ['status' => 200, 'body' => NULL, 'headers' => [
       'AIFP-Quota-Remaining' => (string) ($limit - $used),
       'AIFP-Receipt-Id' => $p['receipt_id'],
-    ], 'event' => ['kind' => 'serve', 'operator' => 'aifinpay', 'ua_class' => 'aifp_agent', 'verified' => TRUE],
+    ] + self::licenseHeaders($api, $merchant, $p['lic'] ?? NULL), 'event' => ['kind' => 'serve', 'operator' => 'aifinpay', 'ua_class' => 'aifp_agent', 'verified' => TRUE],
       // Verified claims that tie this read to its quote and payment.
       'receipt' => array_map(static fn($v): string => is_scalar($v) ? substr((string) $v, 0, 100) : '',
         array_intersect_key($p, array_flip(['receipt_id', 'quote_id', 'tx_ref', 'chain', 'network_mode']))) + ['remaining' => (string) ($limit - $used)]];
