@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A page opened with a receipt that names a content licence carries
+  `AIFP-License: id=…; rev=…; sha256=…; url="…"` and `Link: <…/text>; rel="license"`,
+  as in `@aifinpay/gate`. The URL is built from the API origin and the merchant, never
+  read from the token, and `Link` is added beside Drupal's canonical and shortlink
+  links instead of replacing them. A malformed `lic` claim adds nothing.
 - The 402 no longer carries `protocol_fee_bps`. The fee is set per merchant and
   stated by the quote, matching `@aifinpay/gate` 0.11.0.
 
