@@ -9,6 +9,8 @@
   links instead of replacing them. A malformed `lic` claim adds nothing.
 - The 402 no longer carries `protocol_fee_bps`. The fee is set per merchant and
   stated by the quote, matching `@aifinpay/gate` 0.11.0.
+- The settings form names the dashboard page the connect code is on: Profile &
+  keys → API keys → Connect a CMS site.
 
 ## 1.0.2
 
