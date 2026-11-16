@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3
 
 - A page opened with a receipt that names a content licence carries
   `AIFP-License: id=…; rev=…; sha256=…; url="…"` and `Link: <…/text>; rel="license"`,
