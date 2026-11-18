@@ -24,7 +24,7 @@ function aifinpay_requirements($phase): array {
 function aifinpay_uninstall(): void {
   \Drupal::queue('aifinpay_telemetry')->deleteQueue();
   \Drupal::queue('aifinpay_gate_events')->deleteQueue();
-  \Drupal::state()->deleteMultiple(['aifinpay.connection', 'aifinpay.merchant_record']);
+  \Drupal::state()->deleteMultiple(['aifinpay.connection', 'aifinpay.merchant_record', \Drupal\aifinpay\Connect\ReaderKeys::STATE_KEY]);
 }
 
 function aifinpay_schema(): array {
@@ -91,6 +91,23 @@ function aifinpay_update_11004(): void {
   }
   if ($config->get('exempt_humans') === NULL) {
     $config->set('exempt_humans', FALSE);
+  }
+  $config->save();
+}
+
+/**
+ * Adds "Who reads for free": exempt_humans on is named, off is everyone, as before.
+ */
+function aifinpay_update_11005(): void {
+  $config = \Drupal::configFactory()->getEditable('aifinpay.settings');
+  if (!in_array($config->get('free_readers'), ['named', 'proven', 'everyone'], TRUE)) {
+    $config->set('free_readers', $config->get('exempt_humans') ? 'named' : 'everyone');
+  }
+  if ($config->get('turnstile_sitekey') === NULL) {
+    $config->set('turnstile_sitekey', '');
+  }
+  if ($config->get('paid_fields') === NULL) {
+    $config->set('paid_fields', ['body']);
   }
   $config->save();
 }

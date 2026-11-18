@@ -1,0 +1,31 @@
+<?php
+
+/**
+ * @file
+ * Holds the paid fields of a node back from a client that has not proven it reads free.
+ */
+
+use Drupal\aifinpay\Render\PaidFields;
+use Drupal\Core\Entity\Display\EntityViewDisplayInterface;
+use Drupal\Core\Entity\EntityInterface;
+
+/**
+ * Implements hook_entity_build_defaults_alter().
+ */
+function aifinpay_entity_build_defaults_alter(array &$build, EntityInterface $entity, $view_mode): void {
+  PaidFields::buildDefaultsAlter($build, $entity);
+}
+
+/**
+ * Implements hook_entity_view_alter().
+ */
+function aifinpay_entity_view_alter(array &$build, EntityInterface $entity, EntityViewDisplayInterface $display): void {
+  PaidFields::viewAlter($build, $entity, (string) $display->getMode());
+}
+
+/**
+ * Implements hook_page_attachments_alter().
+ */
+function aifinpay_page_attachments_alter(array &$attachments): void {
+  PaidFields::attachmentsAlter($attachments);
+}

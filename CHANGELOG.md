@@ -1,7 +1,16 @@
 # Changelog
 
-## 1.0.3
+## 1.1.0
 
+- **Who reads for free** has a third choice, *proven*: readers who passed a
+  silent Cloudflare Turnstile check (a signed `__aifp_human` cookie, the format
+  shared with `@aifinpay/gate`) and search engines verified by forward-confirmed
+  reverse DNS read free; everyone else gets the 402. A browser gets the page
+  itself as a 402 with its paid fields held back before rendering and the price
+  embedded; it fills itself in once the check passes. `POST /__aifp/human`
+  answers the check. `exempt_humans` keeps its meaning and update 11005 adds
+  `free_readers`, `turnstile_sitekey` and `paid_fields` to match it, so an
+  installed site behaves as before.
 - A page opened with a receipt that names a content licence carries
   `AIFP-License: id=…; rev=…; sha256=…; url="…"` and `Link: <…/text>; rel="license"`,
   as in `@aifinpay/gate`. The URL is built from the API origin and the merchant, never

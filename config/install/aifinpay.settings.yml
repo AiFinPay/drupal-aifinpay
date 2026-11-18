@@ -18,3 +18,7 @@ discovery_link: true
 discovery_documents: true
 tier: standard
 exempt_humans: false
+free_readers: everyone
+turnstile_sitekey: ''
+paid_fields:
+  - body

@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace Drupal\aifinpay\Form;
 
+use Drupal\Core\Cache\Cache;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Site\Settings;
 use Drupal\aifinpay\Connect\ConnectClient;
 use Drupal\aifinpay\Connect\ConnectException;
 use Drupal\aifinpay\Connect\MerchantRecord;
+use Drupal\aifinpay\Connect\ReaderKeys;
 use Drupal\aifinpay\Connect\SiteBinding;
+use Drupal\aifinpay\Policy\FreeReaders;
 use Drupal\aifinpay\Policy\Paths;
 use Drupal\aifinpay\Protocol\Transport;
 use Drupal\aifinpay\Protocol\HostedGateway;
@@ -39,7 +42,19 @@ final class SettingsForm extends ConfigFormBase {
     foreach (['protected_paths', 'allowed_paths', 'excluded_paths'] as $key) {
       $form[$key] = ['#type' => 'textarea', '#title' => ucfirst(str_replace('_', ' ', $key)), '#default_value' => implode("\n", $config->get($key) ?? []), '#description' => $this->t('One exact path or /prefix/* per line. User-Agent never authorizes access.')];
     }
-    $form['exempt_humans'] = ['#type' => 'checkbox', '#title' => $this->t('Self-hosted gate: serve readers free'), '#default_value' => (bool) $config->get('exempt_humans'), '#description' => $this->t('A request that does not identify as an AI agent gets the page without payment. Same rule as the gate SDK content-site exemption: a scraper with a browser User-Agent is served free; an agent that sends an AiFinPay receipt or agent ID always pays.')];
+    // Keyed exempt_humans so a submission of the former checkbox (1 or 0) keeps its meaning.
+    $form['exempt_humans'] = ['#type' => 'radios', '#title' => $this->t('Who reads for free'),
+      '#options' => [
+        1 => $this->t('Everyone who does not name itself an AI agent (a scraper with a browser User-Agent reads free)'),
+        'proven' => $this->t('Readers who passed a silent browser check, and verified search engines; everyone else gets the price'),
+        0 => $this->t('Nobody: every request without a receipt pays'),
+      ],
+      '#default_value' => match (FreeReaders::chosen($config->getRawData())) { FreeReaders::PROVEN => 'proven', FreeReaders::NAMED => 1, default => 0 },
+      '#description' => $this->t('Self-hosted gate, protected paths only. An agent that sends an AiFinPay receipt or agent ID always pays. The browser check is Cloudflare Turnstile: enter its site key and secret below. Search engines are verified by reverse DNS of the client IP; behind a proxy or CDN set reverse_proxy in settings.php, or no search engine is verified and they all pay.'),
+    ];
+    $form['turnstile_sitekey'] = ['#type' => 'textfield', '#title' => $this->t('Turnstile site key'), '#default_value' => (string) $config->get('turnstile_sitekey'), '#maxlength' => 128, '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
+    $form['turnstile_secret'] = ['#type' => 'password', '#title' => $this->t('Turnstile secret key'), '#maxlength' => 512, '#attributes' => ['autocomplete' => 'off'], '#description' => $this->t('Kept on this server only, never in exported configuration. Leave empty to keep the stored one.'), '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
+    $form['paid_fields'] = ['#type' => 'textfield', '#title' => $this->t('Paid fields'), '#default_value' => implode(', ', FreeReaders::paidFields($config->getRawData())), '#description' => $this->t('Node fields held back until the check passes, separated by commas.'), '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
     $form['report_gate_events'] = ['#type' => 'checkbox', '#title' => $this->t('Report agent requests to AiFinPay'), '#default_value' => (bool) $config->get('report_gate_events'), '#description' => $this->t('Sends one event per AI-agent request on a protected path (operator, agent class, path pattern, time; never the User-Agent, IP or content) to the AiFinPay dashboard. Needs a connected site and the path patterns registered as resources in AiFinPay.')];
     $form['discovery_documents'] = ['#type' => 'checkbox', '#title' => $this->t('Serve /llms.txt and /.well-known/x402.json'), '#default_value' => (bool) ($config->get('discovery_documents') ?? TRUE), '#description' => $this->t('Agent instructions and the x402 discovery document, built from the protected paths above. x402.json is published once a merchant ID is set. Turn off if the site publishes its own files.')];
     $form['discovery_link'] = ['#type' => 'checkbox', '#title' => $this->t('Point agents to /llms.txt from every HTML page'), '#default_value' => (bool) ($config->get('discovery_link') ?? TRUE), '#description' => $this->t('Adds the same Link response header as the AiFinPay gate SDKs.')];
@@ -81,6 +96,15 @@ final class SettingsForm extends ConfigFormBase {
         $form_state->setErrorByName('mode', $this->t('Enforcement needs server-controlled gateway/cache validation and environment approval.'));
       }
     }
+    $sitekey = trim((string) $form_state->getValue('turnstile_sitekey'));
+    if ($sitekey !== '' && !preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $sitekey)) {
+      $form_state->setErrorByName('turnstile_sitekey', $this->t('This is not a Turnstile site key.'));
+    }
+    foreach ($this->fieldNames((string) $form_state->getValue('paid_fields')) as $field) {
+      if (!preg_match('/^[a-z0-9_]{1,32}$/D', $field)) {
+        $form_state->setErrorByName('paid_fields', $this->t('Use field machine names, such as body.'));
+      }
+    }
     $ref = (string) $form_state->getValue('secret_reference');
     if ($ref !== '' && !preg_match('/^[A-Z][A-Z0-9_]{2,100}$/D', $ref)) {
       $form_state->setErrorByName('secret_reference', $this->t('Use an uppercase environment variable reference, never a secret.'));
@@ -104,11 +128,26 @@ final class SettingsForm extends ConfigFormBase {
 
   public function submitForm(array &$form, FormStateInterface $form_state): void {
     $config = $this->config('aifinpay.settings');
-    foreach (['enabled', 'mode', 'environment', 'merchant_id', 'site_id', 'api_endpoint', 'secret_reference', 'pricing_policy', 'verification', 'tier', 'exempt_humans', 'logging_level', 'telemetry_enabled', 'telemetry_sample', 'report_gate_events', 'discovery_documents', 'discovery_link'] as $key) {
+    foreach (['enabled', 'mode', 'environment', 'merchant_id', 'site_id', 'api_endpoint', 'secret_reference', 'pricing_policy', 'verification', 'tier', 'logging_level', 'telemetry_enabled', 'telemetry_sample', 'report_gate_events', 'discovery_documents', 'discovery_link'] as $key) {
       $config->set($key, $form_state->getValue($key));
     }
     foreach (['protected_paths', 'allowed_paths', 'excluded_paths'] as $key) {
       $config->set($key, $this->lines((string) $form_state->getValue($key)));
+    }
+    $choice = (string) $form_state->getValue('exempt_humans');
+    $free = $choice === 'proven' ? FreeReaders::PROVEN : ($choice === '1' ? FreeReaders::NAMED : FreeReaders::EVERYONE);
+    if ($free !== FreeReaders::chosen($config->getRawData())) {
+      Cache::invalidateTags(['rendered']);
+    }
+    $config->set('exempt_humans', $free === FreeReaders::NAMED)->set('free_readers', $free);
+    $config->set('turnstile_sitekey', trim((string) $form_state->getValue('turnstile_sitekey')));
+    $config->set('paid_fields', $this->fieldNames((string) $form_state->getValue('paid_fields')) ?: ['body']);
+    $secret = trim((string) $form_state->getValue('turnstile_secret'));
+    if ($secret !== '') {
+      ReaderKeys::storeTurnstileSecret($secret);
+    }
+    if ($free === FreeReaders::PROVEN) {
+      ReaderKeys::ensureReaderKey();
     }
     $connection = $form_state->get('aifinpay_connection');
     if (is_array($connection)) {
@@ -159,6 +198,7 @@ final class SettingsForm extends ConfigFormBase {
       [$this->t('Charging hosts'), $hosts === [] ? $this->t('None') : $this->t('@hosts (@source)', ['@hosts' => implode(', ', $hosts), '@source' => ($resolved['trusted_hosts_source'] ?? '') === 'merchant_record' ? $this->t('site URL in AiFinPay') : $this->t('settings.php')])],
       [$this->t('Mode'), match ($mode) { 'ENFORCE' => $this->t('Enforce: agents pay'), 'SHADOW' => $this->t('Shadow: agents observed, nothing charged'), default => $this->t('Off') }],
       [$this->t('Charging approved'), $this->approvalText(MerchantRecord::approvalReason($resolved, $record), ReceiptGate::approved($resolved))],
+      [$this->t('Who reads for free'), $this->freeReadersText($config)],
     ];
     return ['#type' => 'table', '#rows' => array_map(static fn(array $r): array => [['data' => $r[0], 'header' => TRUE], $r[1]], $rows)];
   }
@@ -172,6 +212,25 @@ final class SettingsForm extends ConfigFormBase {
       'not_connected' => $this->t('No: not connected. Paste a connect code above.'),
       default => $this->t('No: the AiFinPay merchant record could not be read. Try again later.'),
     };
+  }
+
+  /** What the setting does now, and why `proven` is not active yet. */
+  private function freeReadersText(array $config): \Stringable {
+    $missing = FreeReaders::missing($config, ReaderKeys::get());
+    return match (FreeReaders::chosen($config)) {
+      FreeReaders::NAMED => $this->t('Everyone who does not name itself an AI agent'),
+      FreeReaders::EVERYONE => $this->t('Nobody: every request without a receipt pays'),
+      default => $missing === []
+        ? $this->t('Readers who passed the browser check, and verified search engines')
+        : $this->t('Nobody yet: every request without a receipt pays until @missing @verb set.', [
+          '@missing' => implode(', ', array_map(static fn(string $m): string => ['turnstile_sitekey' => 'the Turnstile site key', 'turnstile_secret' => 'the Turnstile secret key', 'reader_key' => 'the reader key (saved with this form)'][$m], $missing)),
+          '@verb' => count($missing) === 1 ? 'is' : 'are',
+        ]),
+    };
+  }
+
+  private function fieldNames(string $text): array {
+    return array_values(array_unique(array_filter(array_map('trim', preg_split('/[\s,]+/', $text) ?: []), static fn(string $s): bool => $s !== '')));
   }
 
   private function lines(string $text): array {
