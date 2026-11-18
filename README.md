@@ -64,16 +64,16 @@ hosts where agents are charged, the mode, and whether charging is approved.
 **Who reads for free** decides who opens a protected page without a receipt.
 An agent that sends an AiFinPay receipt or agent ID always pays.
 
-| Choice | Config | Who reads free |
-|---|---|---|
-| Everyone who does not name itself an AI agent | `exempt_humans: true` | Any request without a known AI User-Agent (a scraper with a browser User-Agent too) |
-| Readers who passed a silent browser check, and verified search engines | `free_readers: proven` | A browser holding a valid `__aifp_human` cookie; Googlebot, Bingbot, Applebot, YandexBot and Baiduspider confirmed by reverse and forward DNS |
-| Nobody | `exempt_humans: false` | Nobody: every request without a receipt pays |
+| Mode | What it does | Config | Who reads free |
+|---|---|---|---|
+| **AI agents only** | Clients that say they are AI agents pay. Everyone else reads. | `exempt_humans: true` | Any request without a known AI User-Agent (a scraper with a browser User-Agent too) |
+| **Strict** | Only readers who passed a silent check and verified search engines read. Everyone else pays. | `free_readers: proven` | A browser holding a valid `__aifp_human` cookie; Googlebot, Bingbot, Applebot, YandexBot and Baiduspider confirmed by reverse and forward DNS |
+| **Everyone pays** | Every request without a receipt pays. For APIs, catalogs and data feeds. | `exempt_humans: false` | Nobody |
 
 Installed sites keep what they had: `exempt_humans` still chooses between the
 first and the last row, and the update sets `free_readers` to match.
 
-With **proven**, a browser that has not passed the check gets the page itself
+With **Strict** (`proven`), a browser that has not passed the check gets the page itself
 with status 402: the node's paid fields (`paid_fields`, default `body`) are
 replaced before rendering by a holder, the price is embedded as
 `<script type="application/json" id="aifp-402">`, and Cloudflare Turnstile
@@ -93,6 +93,41 @@ the Status table says what is missing.
 Search engines are verified from the client IP. Behind a proxy or CDN, set
 `reverse_proxy` and `reverse_proxy_addresses` in settings.php, or no search
 engine is verified and they all pay.
+
+## Tell agents what a page is
+
+The 402 of a protected node can say what the page is, so an agent knows what
+it is paying for:
+
+```json
+"about": { "title": "Harbour report", "description": "Weekly harbour notes: tides, berths and pilot hours." }
+```
+
+| Setting | `about` | The 402 carries |
+|---|---|---|
+| Title and summary (default on a new install) | `title_summary` | The node title and, when an editor typed one, the body **Summary** |
+| Title | `title` | The node title only |
+| Off (what an updated site has) | `off` | No `about` |
+
+The description is only what an editor wrote in the body's Summary field, or
+in the plain-text field named in `about_field` (a `string` or `string_long`
+field that is not paid). It is never cut from the body and never Drupal's
+trimmed summary: a node with an empty Summary has no description. A summary
+that repeats a run of the paid text is left out. Both parts are plain text,
+cleaned exactly as `@aifinpay/gate` and `aifinpay-gate` do (the shared vectors
+`about-v1.json`): tags removed, entities decoded once, control characters
+removed, whitespace collapsed, the title cut at 200 code points and the
+description at 300, with no ellipsis. `about` sits right after `resource`.
+
+Only a published node that anonymous visitors may view is described, found
+from the request path (alias or `/node/{id}`); any other protected path has no
+`about`. The held page of **Strict** embeds the same object. It is information
+only: the price, the quote, the receipt and the metering do not depend on it.
+A new install starts with `about: title_summary`. An installed site that
+updates gets `about: off` from update 11006 (and `about_field: ''`), so it
+publishes nothing it did not before: under **Strict** the body summary was held
+back as paid text until now. Turn it on in the form when the summaries are
+meant to be public. A site without the key at all is treated as `off`.
 
 ## What the module sends to AiFinPay
 

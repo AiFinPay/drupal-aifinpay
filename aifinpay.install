@@ -112,6 +112,20 @@ function aifinpay_update_11005(): void {
   $config->save();
 }
 
+/**
+ * Adds "Tell agents what a page is", off on an installed site: it publishes nothing new until the owner turns it on.
+ */
+function aifinpay_update_11006(): void {
+  $config = \Drupal::configFactory()->getEditable('aifinpay.settings');
+  if (!in_array($config->get('about'), ['off', 'title', 'title_summary'], TRUE)) {
+    $config->set('about', 'off');
+  }
+  if (!is_string($config->get('about_field'))) {
+    $config->set('about_field', '');
+  }
+  $config->save();
+}
+
 function aifinpay_cron(): void {
   $site = \Drupal\aifinpay\Connect\SiteBinding::get();
   if (($site['credential_source'] ?? '') === 'connect_code') {

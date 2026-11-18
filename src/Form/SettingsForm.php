@@ -18,6 +18,7 @@ use Drupal\aifinpay\Policy\Paths;
 use Drupal\aifinpay\Protocol\Transport;
 use Drupal\aifinpay\Protocol\HostedGateway;
 use Drupal\aifinpay\Protocol\ReceiptGate;
+use Drupal\aifinpay\Render\About;
 
 final class SettingsForm extends ConfigFormBase {
 
@@ -45,16 +46,28 @@ final class SettingsForm extends ConfigFormBase {
     // Keyed exempt_humans so a submission of the former checkbox (1 or 0) keeps its meaning.
     $form['exempt_humans'] = ['#type' => 'radios', '#title' => $this->t('Who reads for free'),
       '#options' => [
-        1 => $this->t('Everyone who does not name itself an AI agent (a scraper with a browser User-Agent reads free)'),
-        'proven' => $this->t('Readers who passed a silent browser check, and verified search engines; everyone else gets the price'),
-        0 => $this->t('Nobody: every request without a receipt pays'),
+        1 => $this->t('AI agents only'),
+        'proven' => $this->t('Strict'),
+        0 => $this->t('Everyone pays'),
       ],
+      1 => ['#description' => $this->t('Clients that say they are AI agents pay. Everyone else reads.')],
+      'proven' => ['#description' => $this->t('Only readers who passed a silent check and verified search engines read. Everyone else pays.')],
+      0 => ['#description' => $this->t('Every request without a receipt pays. For APIs, catalogs and data feeds.')],
       '#default_value' => match (FreeReaders::chosen($config->getRawData())) { FreeReaders::PROVEN => 'proven', FreeReaders::NAMED => 1, default => 0 },
       '#description' => $this->t('Self-hosted gate, protected paths only. An agent that sends an AiFinPay receipt or agent ID always pays. The browser check is Cloudflare Turnstile: enter its site key and secret below. Search engines are verified by reverse DNS of the client IP; behind a proxy or CDN set reverse_proxy in settings.php, or no search engine is verified and they all pay.'),
     ];
     $form['turnstile_sitekey'] = ['#type' => 'textfield', '#title' => $this->t('Turnstile site key'), '#default_value' => (string) $config->get('turnstile_sitekey'), '#maxlength' => 128, '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
     $form['turnstile_secret'] = ['#type' => 'password', '#title' => $this->t('Turnstile secret key'), '#maxlength' => 512, '#attributes' => ['autocomplete' => 'off'], '#description' => $this->t('Kept on this server only, never in exported configuration. Leave empty to keep the stored one.'), '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
     $form['paid_fields'] = ['#type' => 'textfield', '#title' => $this->t('Paid fields'), '#default_value' => implode(', ', FreeReaders::paidFields($config->getRawData())), '#description' => $this->t('Node fields held back until the check passes, separated by commas.'), '#states' => ['visible' => [':input[name="exempt_humans"]' => ['value' => 'proven']]]];
+    $form['about'] = ['#type' => 'radios', '#title' => $this->t('Tell agents what a page is'),
+      '#options' => [About::OFF => $this->t('Off'), About::TITLE => $this->t('Title'), About::TITLE_SUMMARY => $this->t('Title and summary')],
+      '#default_value' => About::setting($config->getRawData()),
+      '#description' => $this->t('Adds the page title and, if you wrote one, its summary to the price an agent gets, so it knows what it is paying for. The summary is only what an editor typed in the body Summary field (or the field named below), never text taken from the page. It does not change the price.'),
+    ];
+    $form['about_field'] = ['#type' => 'textfield', '#title' => $this->t('Summary field'), '#default_value' => (string) $config->get('about_field'), '#maxlength' => 32,
+      '#description' => $this->t('Machine name of a plain-text node field to use instead of the body Summary. Leave empty to use the body Summary. A paid field is never used.'),
+      '#states' => ['visible' => [':input[name="about"]' => ['value' => About::TITLE_SUMMARY]]],
+    ];
     $form['report_gate_events'] = ['#type' => 'checkbox', '#title' => $this->t('Report agent requests to AiFinPay'), '#default_value' => (bool) $config->get('report_gate_events'), '#description' => $this->t('Sends one event per AI-agent request on a protected path (operator, agent class, path pattern, time; never the User-Agent, IP or content) to the AiFinPay dashboard. Needs a connected site and the path patterns registered as resources in AiFinPay.')];
     $form['discovery_documents'] = ['#type' => 'checkbox', '#title' => $this->t('Serve /llms.txt and /.well-known/x402.json'), '#default_value' => (bool) ($config->get('discovery_documents') ?? TRUE), '#description' => $this->t('Agent instructions and the x402 discovery document, built from the protected paths above. x402.json is published once a merchant ID is set. Turn off if the site publishes its own files.')];
     $form['discovery_link'] = ['#type' => 'checkbox', '#title' => $this->t('Point agents to /llms.txt from every HTML page'), '#default_value' => (bool) ($config->get('discovery_link') ?? TRUE), '#description' => $this->t('Adds the same Link response header as the AiFinPay gate SDKs.')];
@@ -105,6 +118,13 @@ final class SettingsForm extends ConfigFormBase {
         $form_state->setErrorByName('paid_fields', $this->t('Use field machine names, such as body.'));
       }
     }
+    $aboutField = trim((string) $form_state->getValue('about_field'));
+    if ($aboutField !== '' && !preg_match('/^[a-z0-9_]{1,32}$/D', $aboutField)) {
+      $form_state->setErrorByName('about_field', $this->t('Use a field machine name, such as field_teaser.'));
+    }
+    elseif ($aboutField !== '' && in_array($aboutField, $this->fieldNames((string) $form_state->getValue('paid_fields')) ?: ['body'], TRUE)) {
+      $form_state->setErrorByName('about_field', $this->t('This field is paid, so it cannot describe the page.'));
+    }
     $ref = (string) $form_state->getValue('secret_reference');
     if ($ref !== '' && !preg_match('/^[A-Z][A-Z0-9_]{2,100}$/D', $ref)) {
       $form_state->setErrorByName('secret_reference', $this->t('Use an uppercase environment variable reference, never a secret.'));
@@ -142,6 +162,7 @@ final class SettingsForm extends ConfigFormBase {
     $config->set('exempt_humans', $free === FreeReaders::NAMED)->set('free_readers', $free);
     $config->set('turnstile_sitekey', trim((string) $form_state->getValue('turnstile_sitekey')));
     $config->set('paid_fields', $this->fieldNames((string) $form_state->getValue('paid_fields')) ?: ['body']);
+    $config->set('about', About::setting(['about' => $form_state->getValue('about') ?? $config->get('about')]))->set('about_field', trim((string) $form_state->getValue('about_field')));
     $secret = trim((string) $form_state->getValue('turnstile_secret'));
     if ($secret !== '') {
       ReaderKeys::storeTurnstileSecret($secret);

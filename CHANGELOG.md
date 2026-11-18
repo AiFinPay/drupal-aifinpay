@@ -1,7 +1,21 @@
 # Changelog
 
-## 1.1.0
+## 1.2.0
 
+- **Who reads for free** names its three choices as modes: *AI agents only*
+  (`named`), *Strict* (`proven`) and *Everyone pays* (`everyone`), each with a
+  one-line description. Stored values and `exempt_humans` are unchanged.
+- **Tell agents what a page is** (`about`: `off`, `title`, `title_summary`;
+  `title_summary` on a new install, `off` on an installed site after update
+  11006, so an update publishes nothing new, since **Strict** held the body
+  summary back until now): the 402 of a published node, and the terms embedded
+  in its held page, carry `about: {title, description}`. The description is
+  only the body Summary an editor typed, or the plain-text field named in
+  `about_field`; never body text or a generated summary. Plain text cleaned as
+  the gate packages do (shared vectors `about-v1.json`), capped at 200 and 300
+  code points, placed right after `resource`. The quote, receipt and metering
+  are unchanged.
+  Update 11006 adds both keys, `about` as `off` unless one is stored.
 - **Who reads for free** has a third choice, *proven*: readers who passed a
   silent Cloudflare Turnstile check (a signed `__aifp_human` cookie, the format
   shared with `@aifinpay/gate`) and search engines verified by forward-confirmed
