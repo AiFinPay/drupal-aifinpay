@@ -59,9 +59,40 @@ The **Status** table at the top of the settings page shows the connected
 merchant, test or live, the site URL and whether its domain is verified, the
 hosts where agents are charged, the mode, and whether charging is approved.
 
-**Serve readers free** lets requests that do not identify as an AI agent
-through without payment. An agent that sends an AiFinPay receipt or agent ID
-always pays.
+## Unproven pays
+
+**Who reads for free** decides who opens a protected page without a receipt.
+An agent that sends an AiFinPay receipt or agent ID always pays.
+
+| Choice | Config | Who reads free |
+|---|---|---|
+| Everyone who does not name itself an AI agent | `exempt_humans: true` | Any request without a known AI User-Agent (a scraper with a browser User-Agent too) |
+| Readers who passed a silent browser check, and verified search engines | `free_readers: proven` | A browser holding a valid `__aifp_human` cookie; Googlebot, Bingbot, Applebot, YandexBot and Baiduspider confirmed by reverse and forward DNS |
+| Nobody | `exempt_humans: false` | Nobody: every request without a receipt pays |
+
+Installed sites keep what they had: `exempt_humans` still chooses between the
+first and the last row, and the update sets `free_readers` to match.
+
+With **proven**, a browser that has not passed the check gets the page itself
+with status 402: the node's paid fields (`paid_fields`, default `body`) are
+replaced before rendering by a holder, the price is embedded as
+`<script type="application/json" id="aifp-402">`, and Cloudflare Turnstile
+(managed, `interaction-only`) runs. When it passes, `POST /__aifp/human` sets
+the cookie and the page fills itself in without a reload. A client that does
+not accept HTML, or a POST, gets the 402 JSON. A page that has no paid field,
+or that repeats its text anywhere else, gets a bare 402 page. Free pages run
+the check unseen, so the next paid page opens whole. Held pages are never
+stored by Drupal's page caches.
+
+Proven needs a Turnstile site key and secret key in the form; the module makes
+the reader key itself. The secret and the reader key are kept in Drupal State
+(or `turnstile_secret` and `reader_key` in the settings.php binding), never in
+exported config. Until all three exist everyone pays on protected paths, and
+the Status table says what is missing.
+
+Search engines are verified from the client IP. Behind a proxy or CDN, set
+`reverse_proxy` and `reverse_proxy_addresses` in settings.php, or no search
+engine is verified and they all pay.
 
 ## What the module sends to AiFinPay
 

@@ -5,17 +5,24 @@ declare(strict_types=1);
 namespace Drupal\aifinpay\Middleware;
 
 use Drupal\aifinpay\Connect\MerchantRecord;
+use Drupal\aifinpay\Connect\ReaderKeys;
 use Drupal\aifinpay\Connect\SiteBinding;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\Core\Queue\QueueFactory;
+use Drupal\aifinpay\Policy\FreeReaders;
 use Drupal\aifinpay\Policy\Paths;
 use Drupal\aifinpay\Protocol\AgentIdentity;
 use Drupal\aifinpay\Protocol\Discovery;
 use Drupal\aifinpay\Protocol\EdgeContext;
 use Drupal\aifinpay\Protocol\EdgeReplayGuard;
 use Drupal\aifinpay\Protocol\HostedGateway;
+use Drupal\aifinpay\Protocol\HumanCheck;
+use Drupal\aifinpay\Protocol\ReaderProof;
 use Drupal\aifinpay\Protocol\ReceiptGate;
+use Drupal\aifinpay\Protocol\SearchBots;
+use Drupal\aifinpay\Render\HeldPage;
+use Drupal\aifinpay\Render\Hold;
 use GuzzleHttp\ClientInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -35,6 +42,8 @@ final class PaymentMiddleware implements HttpKernelInterface {
     private ?EdgeReplayGuard $edgeReplay = NULL,
     private ?ReceiptGate $receiptGate = NULL,
     private ?MerchantRecord $merchantRecord = NULL,
+    private ?SearchBots $searchBots = NULL,
+    private ?HumanCheck $humanCheck = NULL,
   ) {}
 
   public function handle(Request $request, int $type = self::MAIN_REQUEST, bool $catch = TRUE): Response {
@@ -56,6 +65,14 @@ final class PaymentMiddleware implements HttpKernelInterface {
     if ($type !== self::MAIN_REQUEST || empty($config['enabled']) || ($config['mode'] ?? '') === 'OFF') {
       return $this->httpKernel->handle($request, $type, $catch);
     }
+    $setting = FreeReaders::chosen($config);
+    $keys = $setting === FreeReaders::PROVEN ? ReaderKeys::get() : [];
+    // Proven readers only where the self-hosted gate charges and every key is set; otherwise everyone pays.
+    $proven = $setting === FreeReaders::PROVEN && FreeReaders::missing($config, $keys) === [] && $this->searchBots !== NULL
+      && $this->humanCheck !== NULL && ($config['mode'] ?? '') === 'ENFORCE' && ($config['verification'] ?? '') === 'receipt';
+    if ($proven && $request->getPathInfo() === HumanCheck::PATH) {
+      return $this->humanCheck->respond($request, (string) $keys['turnstile_secret'], (string) $keys['reader_key'], $identity, time());
+    }
     $document = $this->discoveryDocument($request, $config);
     if ($document !== NULL) {
       return $document;
@@ -64,12 +81,15 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $path = $request->getPathInfo();
     $rule = Paths::protected($path, $config);
     // Origins disagree on a dot segment, so no price is safe to quote. A reader still gets the page.
-    if ($mode === 'ENFORCE' && Paths::inspect($path)['ambiguous']
-      && (empty($config['exempt_humans']) || AgentIdentity::classify($request)['ua_class'] !== 'human')) {
+    if ($mode === 'ENFORCE' && Paths::inspect($path)['ambiguous'] && !$this->readsFree($request, $setting, $proven, $keys)) {
       return $this->deny(400, 'noncanonical_path');
     }
     if ($rule === NULL) {
-      return $this->httpKernel->handle($request, $type, $catch);
+      $response = $this->httpKernel->handle($request, $type, $catch);
+      if ($proven) {
+        $this->addQuietCheck($request, $response, (string) $config['turnstile_sitekey'], (string) $keys['reader_key']);
+      }
+      return $response;
     }
 
     $start = hrtime(TRUE);
@@ -121,8 +141,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $receipt = ($config['verification'] ?? '') === 'receipt';
     // The self-hosted gate serves a reader free whatever the answer below, so an outage or a
     // pending approval stays the agents' problem. Edge decides who is a reader where it is required.
-    if ($receipt && !empty($config['exempt_humans']) && ($identity['edge_required'] ?? FALSE) !== TRUE
-      && AgentIdentity::classify($request)['ua_class'] === 'human') {
+    if ($receipt && ($identity['edge_required'] ?? FALSE) !== TRUE && $this->readsFree($request, $setting, $proven, $keys)) {
       $response = $this->httpKernel->handle($request, $type, $catch);
       $response->headers->set('AIFP-Paywall', 'exempt');
       $this->forbidStorage($response);
@@ -167,7 +186,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     }
 
     if ($receipt) {
-      return $this->receiptGate($request, $type, $catch, $config, $identity, $rule, $bound, $trace);
+      return $this->receiptGate($request, $type, $catch, $config, $identity, $rule, $bound, $trace, $proven ? $keys : NULL);
     }
 
     if (($config['verification'] ?? '') === 'hosted_gateway') {
@@ -277,14 +296,14 @@ final class PaymentMiddleware implements HttpKernelInterface {
   }
 
   /** ENFORCE with the self-hosted gate: 402, local receipt check, metering here. */
-  private function receiptGate(Request $request, int $type, bool $catch, array $config, array $identity, string $rule, bool $bound, string $trace): Response {
+  private function receiptGate(Request $request, int $type, bool $catch, array $config, array $identity, string $rule, bool $bound, string $trace, ?array $provenKeys = NULL): Response {
     $tier = (string) ($config['tier'] ?? 'standard');
     if ($this->receiptGate === NULL || !isset(ReceiptGate::TIER_WEIGHTS[$tier])
       || !preg_match('/^mrch_[a-z0-9_]{3,32}$/D', (string) ($identity['merchant_id'] ?? ''))) {
       return $this->deny(503, 'gate_not_configured');
     }
     try {
-      $decision = $this->receiptGate->decide($request, $identity, $rule, $tier, !empty($config['exempt_humans']), time());
+      $decision = $this->receiptGate->decide($request, $identity, $rule, $tier, FreeReaders::chosen($config) === FreeReaders::NAMED, time());
     }
     catch (\Throwable) {
       $this->loggerFactory->get('aifinpay')->warning('Receipt gate unavailable. Trace: @trace', ['@trace' => $trace]);
@@ -292,9 +311,14 @@ final class PaymentMiddleware implements HttpKernelInterface {
       $denied->headers->set('Retry-After', '30');
       return $denied;
     }
-    $response = $decision['status'] === 200
-      ? $this->httpKernel->handle($request, $type, $catch)
-      : new JsonResponse($decision['body'], $decision['status']);
+    if ($provenKeys !== NULL && $decision['status'] === 402 && self::unprovenBrowser($request)) {
+      $response = $this->heldPage($request, $type, $catch, $config, $decision['body'], (string) $config['turnstile_sitekey']);
+    }
+    else {
+      $response = $decision['status'] === 200
+        ? $this->httpKernel->handle($request, $type, $catch)
+        : new JsonResponse($decision['body'], $decision['status']);
+    }
     foreach ($decision['headers'] as $name => $value) {
       // Link is added beside Drupal's own canonical and shortlink values.
       $response->headers->set($name, $value, $name !== 'Link');
@@ -307,6 +331,79 @@ final class PaymentMiddleware implements HttpKernelInterface {
       $this->reportGateEvent($config, $identity, $bound, $rule, $event, $event['kind'], (bool) ($event['verified'] ?? FALSE));
     }
     return $response;
+  }
+
+  /** Whether this request reads a protected page free under the site's setting. */
+  private function readsFree(Request $request, string $setting, bool $proven, array $keys): bool {
+    if ($request->headers->has('AIFP-Receipt') || $request->headers->has('AIFP-Agent-Id')) {
+      return FALSE;
+    }
+    if ($setting === FreeReaders::NAMED) {
+      return AgentIdentity::classify($request)['ua_class'] === 'human';
+    }
+    if ($setting !== FreeReaders::PROVEN || !$proven || $this->searchBots === NULL) {
+      return FALSE;
+    }
+    $userAgent = (string) $request->headers->get('User-Agent', '');
+    if ((new ReaderProof((string) $keys['reader_key']))->verify($request->headers->get('Cookie'), $userAgent, time())) {
+      return TRUE;
+    }
+    return $this->searchBots->verify($userAgent, $request->getClientIp()) === 'search';
+  }
+
+  /** A browser asking to read a page without any AiFinPay header. */
+  private static function unprovenBrowser(Request $request): bool {
+    return in_array($request->getMethod(), ['GET', 'HEAD'], TRUE)
+      && !$request->headers->has('AIFP-Receipt') && !$request->headers->has('AIFP-Agent-Id')
+      && preg_match('~\btext/html\b~i', (string) $request->headers->get('Accept', '')) === 1;
+  }
+
+  /** The page itself as a 402 with its paid fields held back, or the bare 402 page when that is not proven. */
+  private function heldPage(Request $request, int $type, bool $catch, array $config, array $terms, string $sitekey): Response {
+    $checkUrl = $request->getBasePath() . HumanCheck::PATH;
+    $hold = new Hold(FreeReaders::paidFields($config));
+    $request->attributes->set(Hold::ATTRIBUTE, $hold);
+    try {
+      $inner = $this->httpKernel->handle($request, $type, $catch);
+    }
+    catch (\Throwable) {
+      $inner = NULL;
+    }
+    finally {
+      $request->attributes->remove(Hold::ATTRIBUTE);
+    }
+    $html = $inner?->getContent();
+    $contentType = (string) $inner?->headers->get('Content-Type');
+    $page = NULL;
+    if ($inner !== NULL && $inner->getStatusCode() === 200 && Discovery::isHtml($contentType) && is_string($html)
+      && $hold->held > 0 && str_contains($html, 'data-aifp-hold') && !$hold->leaksInto($html)) {
+      $page = HeldPage::beforeBodyEnd($html, HeldPage::termsTag($terms) . HeldPage::fillScript($sitekey, $checkUrl));
+    }
+    $response = $page !== NULL
+      ? new Response($page, 402, ['Content-Type' => $contentType])
+      : new Response(HeldPage::barePage($terms, $sitekey, $checkUrl), 402, ['Content-Type' => 'text/html; charset=utf-8']);
+    $response->headers->set('X-Robots-Tag', 'noindex');
+    if ($request->getMethod() === 'HEAD') {
+      $response->setContent('');
+    }
+    return $response;
+  }
+
+  /** On a free page, an unproven browser runs the check unseen. */
+  private function addQuietCheck(Request $request, Response $response, string $sitekey, string $readerKey): void {
+    $userAgent = (string) $request->headers->get('User-Agent', '');
+    $html = $response->getContent();
+    if ($request->getMethod() !== 'GET' || !self::unprovenBrowser($request) || $response->getStatusCode() !== 200
+      || !Discovery::isHtml($response->headers->get('Content-Type')) || !is_string($html)
+      || SearchBots::claimedOperator($userAgent) !== NULL
+      || (new ReaderProof($readerKey))->verify($request->headers->get('Cookie'), $userAgent, time())) {
+      return;
+    }
+    $page = HeldPage::beforeBodyEnd($html, HeldPage::quietScript($sitekey, $request->getBasePath() . HumanCheck::PATH));
+    if ($page !== NULL) {
+      $response->setContent($page);
+      $response->headers->remove('Content-Length');
+    }
   }
 
   private static function wantsRecord(array $identity): bool {

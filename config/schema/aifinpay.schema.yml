@@ -30,4 +30,10 @@ aifinpay.settings:
     discovery_link: { type: boolean, label: 'Link header to /llms.txt and /.well-known/x402.json on HTML pages' }
     discovery_documents: { type: boolean, label: 'Serve /llms.txt and /.well-known/x402.json from this configuration' }
     tier: { type: string, label: 'Price tier of protected paths (self-hosted gate)' }
-    exempt_humans: { type: boolean, label: 'Serve requests that do not identify as an agent without payment (self-hosted gate)' }
+    exempt_humans: { type: boolean, label: 'Serve requests that do not identify as an agent without payment (self-hosted gate); chooses between named and everyone' }
+    free_readers: { type: string, label: 'Who reads protected pages free: named, proven or everyone (self-hosted gate)' }
+    turnstile_sitekey: { type: string, label: 'Cloudflare Turnstile site key (public; the secret is never in config)' }
+    paid_fields:
+      type: sequence
+      label: 'Node fields held back from a client that has not proven it reads free'
+      sequence: { type: string }

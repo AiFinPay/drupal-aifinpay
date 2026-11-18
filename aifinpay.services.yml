@@ -1,7 +1,7 @@
 services:
   aifinpay.middleware:
     class: Drupal\aifinpay\Middleware\PaymentMiddleware
-    arguments: ['@config.factory', '@http_client', '@queue', '@logger.factory', '@aifinpay.hosted_gateway', '@aifinpay.edge_replay', '@aifinpay.receipt_gate', '@aifinpay.merchant_record']
+    arguments: ['@config.factory', '@http_client', '@queue', '@logger.factory', '@aifinpay.hosted_gateway', '@aifinpay.edge_replay', '@aifinpay.receipt_gate', '@aifinpay.merchant_record', '@aifinpay.search_bots', '@aifinpay.human_check']
     tags:
       - { name: http_middleware, priority: 250 }
   aifinpay.transport:
@@ -26,3 +26,13 @@ services:
   aifinpay.edge_replay:
     class: Drupal\aifinpay\Protocol\EdgeReplayGuard
     arguments: ['@database']
+  aifinpay.dns_resolver:
+    class: Drupal\aifinpay\Protocol\SystemDnsResolver
+  aifinpay.search_bots:
+    class: Drupal\aifinpay\Protocol\SearchBots
+    arguments: ['@aifinpay.dns_resolver', '@cache.default', '@datetime.time']
+  aifinpay.siteverify_client:
+    alias: http_client
+  aifinpay.human_check:
+    class: Drupal\aifinpay\Protocol\HumanCheck
+    arguments: ['@aifinpay.siteverify_client']
