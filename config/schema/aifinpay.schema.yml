@@ -37,3 +37,5 @@ aifinpay.settings:
       type: sequence
       label: 'Node fields held back from a client that has not proven it reads free'
       sequence: { type: string }
+    about: { type: string, label: 'Tell agents what a page is: off, title or title_summary' }
+    about_field: { type: string, label: 'Plain-text node field used as the page description instead of the body summary' }

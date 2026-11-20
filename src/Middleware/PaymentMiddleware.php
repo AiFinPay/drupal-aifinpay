@@ -21,6 +21,8 @@ use Drupal\aifinpay\Protocol\HumanCheck;
 use Drupal\aifinpay\Protocol\ReaderProof;
 use Drupal\aifinpay\Protocol\ReceiptGate;
 use Drupal\aifinpay\Protocol\SearchBots;
+use Drupal\aifinpay\Render\About;
+use Drupal\aifinpay\Render\AboutPage;
 use Drupal\aifinpay\Render\HeldPage;
 use Drupal\aifinpay\Render\Hold;
 use GuzzleHttp\ClientInterface;
@@ -44,6 +46,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     private ?MerchantRecord $merchantRecord = NULL,
     private ?SearchBots $searchBots = NULL,
     private ?HumanCheck $humanCheck = NULL,
+    private ?AboutPage $aboutPage = NULL,
   ) {}
 
   public function handle(Request $request, int $type = self::MAIN_REQUEST, bool $catch = TRUE): Response {
@@ -310,6 +313,15 @@ final class PaymentMiddleware implements HttpKernelInterface {
       $denied = $this->deny(503, 'payment_service_unavailable');
       $denied->headers->set('Retry-After', '30');
       return $denied;
+    }
+    // Information for the agent only: added after the decision, so price, receipt and meter never see it.
+    if ($decision['status'] === 402 && ($decision['body']['error'] ?? NULL) === 'AIFP-402' && $this->aboutPage !== NULL) {
+      try {
+        $decision['body'] = About::into($decision['body'], $this->aboutPage->forRequest($request, $config));
+      }
+      catch (\Throwable) {
+        // Without it the 402 is the gate's own.
+      }
     }
     if ($provenKeys !== NULL && $decision['status'] === 402 && self::unprovenBrowser($request)) {
       $response = $this->heldPage($request, $type, $catch, $config, $decision['body'], (string) $config['turnstile_sitekey']);

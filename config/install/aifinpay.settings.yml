@@ -22,3 +22,5 @@ free_readers: everyone
 turnstile_sitekey: ''
 paid_fields:
   - body
+about: title_summary
+about_field: ''
