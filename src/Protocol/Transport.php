@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace Drupal\aifinpay\Protocol;
 
+use Drupal\Core\Config\ConfigFactoryInterface;
 use GuzzleHttp\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
 
 /** Audited AIFP endpoints, pinned origins; no redirects or automatic retries. */
 final class Transport {
 
-  public function __construct(private ClientInterface $client) {}
+  public function __construct(private ClientInterface $client, private ?ConfigFactoryInterface $configFactory = NULL) {}
 
   public static function origin(array $site, string $kind): string {
     $value = $site[$kind . '_origin'] ?? '';
@@ -30,10 +31,21 @@ final class Transport {
     if (!in_array($method, ['GET', 'HEAD', 'POST'], TRUE) || !str_starts_with($path, '/') || str_contains($path, '?')) {
       throw new \RuntimeException('invalid_request');
     }
+    if (isset($options['headers']['AIFP-Merchant-Secret'])) {
+      $options['headers'] = GateIdentity::headers($this->settings()) + $options['headers'];
+    }
     return $this->client->request($method, self::origin($site, $kind) . $path, $options + [
       'connect_timeout' => 0.5, 'timeout' => 8.0, 'allow_redirects' => FALSE,
       'http_errors' => FALSE, 'verify' => TRUE, 'stream' => TRUE,
     ]);
+  }
+
+  /** The module settings as they are now, for the identity headers. */
+  private function settings(): array {
+    if ($this->configFactory !== NULL) {
+      return $this->configFactory->get('aifinpay.settings')->getRawData();
+    }
+    return \Drupal::hasContainer() ? \Drupal::config('aifinpay.settings')->getRawData() : [];
   }
 
   public static function read(ResponseInterface $response, int $limit = 65536): string {

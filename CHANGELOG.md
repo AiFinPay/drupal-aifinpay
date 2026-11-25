@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0
+
+- Every request to AiFinPay with the merchant secret (gate events, receipt use,
+  traffic summaries, the resource registry) names the module:
+  `User-Agent: aifinpay-gate-drupal/1.4.0` and
+  `AIFP-Gate: pkg=drupal; ver=1.4.0; platform=drupal11; mode=…; charge=…`, mode
+  and charge from the settings at that moment (**Who reads for free**: *AI
+  agents only* is `agents`, *Strict* is `unproven`, *Everyone pays* is
+  `everyone`), byte for byte the shared vectors `gate-identity-v1.json`.
+- Traffic summaries: every request the gate decides is counted once, after the
+  response has been sent (`kernel.terminate`, or a shutdown function for the
+  responses Drupal does not terminate: the gate's own 402, 403 and 503 and
+  page-cache hits), by agent class and outcome
+  (`served`, `challenged`, `paid`, `blocked`, `error`); agents also by operator
+  and first path segment; country from the header **Country header** names
+  (default `CF-IPCountry`), network only from **Network header** (no default)
+  and never for readers. A page's images and scripts served free, and a request
+  carrying `AIFP-Edge-Counted: 1`, are not counted; the marked request is
+  otherwise answered exactly as before. Counts live in the new tables
+  `aifinpay_traffic_windows` and `aifinpay_traffic`, in five-minute windows,
+  at most 1000 distinct sections and networks per window. Cron sends each
+  closed window to `POST /v1/merchants/{id}/gate-traffic` as the shared vectors
+  `gate-traffic-v1.json` build it, with its own state: at most three windows
+  held, the same id and bytes on retry, a 404 pauses six hours, another refusal
+  a day, a window older than an hour is dropped. Gate events and receipt use do
+  not depend on it. On by default for a connected site; **Send traffic
+  summaries to AiFinPay** turns it off. Update 11008 adds the tables and the
+  three settings.
+
 ## 1.3.0
 
 - The site tells AiFinPay how much of each receipt it has spent. Every metered
