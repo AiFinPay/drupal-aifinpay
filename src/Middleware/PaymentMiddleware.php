@@ -434,13 +434,19 @@ final class PaymentMiddleware implements HttpKernelInterface {
     if ($setting === FreeReaders::NAMED) {
       return 'served';
     }
-    if ($setting === FreeReaders::PROVEN) {
-      $keys = ReaderKeys::get();
-      $userAgent = (string) $request->headers->get('User-Agent', '');
-      if (SearchBots::claimedOperator($userAgent) !== NULL || ($keys['reader_key'] !== NULL
-        && (new ReaderProof($keys['reader_key']))->verify($request->headers->get('Cookie'), $userAgent, time()))) {
-        return 'served';
+    try {
+      if ($setting === FreeReaders::PROVEN) {
+        $keys = ReaderKeys::get();
+        $userAgent = (string) $request->headers->get('User-Agent', '');
+        if (SearchBots::claimedOperator($userAgent) !== NULL || ($keys['reader_key'] !== NULL
+          && (new ReaderProof($keys['reader_key']))->verify($request->headers->get('Cookie'), $userAgent, time()))) {
+          return 'served';
+        }
       }
+    }
+    catch (\Throwable) {
+      // Watching never breaks a page; the count says what was served.
+      return 'served';
     }
     return 'challenged';
   }
