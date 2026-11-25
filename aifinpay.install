@@ -53,6 +53,14 @@ function aifinpay_schema(): array {
     ],
     'primary key' => ['receipt_hash'],
     'indexes' => ['expires' => ['expires']],
+  ], 'aifinpay_receipt_use' => [
+    'description' => 'Lowest units left per receipt id, waiting to be sent to AiFinPay; no receipts or PII.',
+    'fields' => [
+      'receipt_id' => ['type' => 'varchar_ascii', 'length' => 21, 'not null' => TRUE],
+      'remaining' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+      'attempts' => ['type' => 'int', 'size' => 'tiny', 'not null' => TRUE, 'default' => 0],
+    ],
+    'primary key' => ['receipt_id'],
   ]];
 }
 
@@ -126,6 +134,16 @@ function aifinpay_update_11006(): void {
   $config->save();
 }
 
+/**
+ * Adds the receipt-use table: how much of each receipt this site spent, sent to AiFinPay on cron.
+ */
+function aifinpay_update_11007(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('aifinpay_receipt_use')) {
+    $schema->createTable('aifinpay_receipt_use', aifinpay_schema()['aifinpay_receipt_use']);
+  }
+}
+
 function aifinpay_cron(): void {
   $site = \Drupal\aifinpay\Connect\SiteBinding::get();
   if (($site['credential_source'] ?? '') === 'connect_code') {
@@ -134,5 +152,14 @@ function aifinpay_cron(): void {
   \Drupal::database()->delete('aifinpay_edge_nonces')->condition('expires', time(), '<')->execute();
   \Drupal::database()->delete('aifinpay_actions')->condition('expires', time(), '<')->execute();
   \Drupal::database()->delete('aifinpay_receipt_units')->condition('expires', time(), '<')->execute();
+  if (\Drupal\aifinpay\Protocol\ReceiptUse::credentials($site) !== NULL) {
+    try {
+      \Drupal\aifinpay\Protocol\ReceiptUse::flush(\Drupal::database(),
+        \Drupal\aifinpay\Protocol\ReceiptUse::poster($site, \Drupal::service('aifinpay.transport')));
+    }
+    catch (\Throwable) {
+      // What is held stays for the next cron run.
+    }
+  }
 }
 

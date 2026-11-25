@@ -137,6 +137,10 @@ meant to be public. A site without the key at all is treated as `off`.
   (`/.well-known/jwks.json`) at most every ten minutes. If AiFinPay cannot be
   reached, the last site record is used for up to a day; after that protected
   paths answer 503 until it is reachable again.
+- In Enforce, on cron: how much of each receipt this site has spent, the
+  receipt id and the units left (`POST /v1/merchants/{id}/receipt-use`, at
+  most 100 per call), so AiFinPay, its dashboard and the paying agent show
+  what this site counted. Never the receipt itself.
 - Only if you opt in: one event per agent request to a protected path
   (operator, agent class, path pattern, time). Never the User-Agent, IP
   address or page content.

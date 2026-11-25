@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0
+
+- The site tells AiFinPay how much of each receipt it has spent. Every metered
+  read keeps the receipt id (never the token) and the units left in the new
+  table `aifinpay_receipt_use`, the lowest per receipt; cron sends them to
+  `POST /v1/merchants/{id}/receipt-use` with the merchant secret, at most 100
+  per call, ordered by id, byte for byte the shared vectors
+  `receipt-use-v1.json`. Sent whenever the site has its secret, apart from the
+  `report_gate_events` opt-in. A 404 (an API without the route), another
+  refusal or a redirect drops what is held and the next read records again;
+  a network error, 408, 429 or 5xx keeps it for up to five cron runs. A
+  failure never reaches the paid read and gate events are unchanged.
+  Update 11007 adds the table.
+
 ## 1.2.0
 
 - **Who reads for free** names its three choices as modes: *AI agents only*

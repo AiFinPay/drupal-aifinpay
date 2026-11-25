@@ -191,8 +191,10 @@ final class ReceiptGate {
         ->where('used + :w2 <= :limit', [':w2' => $weight, ':limit' => $limit])
         ->execute();
       if ($updated > 0) {
-        return (int) $this->database->select('aifinpay_receipt_units', 'u')
+        $used = (int) $this->database->select('aifinpay_receipt_units', 'u')
           ->fields('u', ['used'])->condition('receipt_hash', $hash)->execute()->fetchField();
+        ReceiptUse::record($this->database, $receiptId, $limit - $used);
+        return $used;
       }
       if ($this->database->select('aifinpay_receipt_units', 'u')->condition('receipt_hash', $hash)->countQuery()->execute()->fetchField() > 0) {
         return NULL;
@@ -203,6 +205,7 @@ final class ReceiptGate {
       try {
         $this->database->insert('aifinpay_receipt_units')
           ->fields(['receipt_hash' => $hash, 'used' => $weight, 'expires' => $expires])->execute();
+        ReceiptUse::record($this->database, $receiptId, $limit - $weight);
         return $weight;
       }
       catch (IntegrityConstraintViolationException) {
