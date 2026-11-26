@@ -69,12 +69,15 @@ final class SettingsForm extends ConfigFormBase {
       '#states' => ['visible' => [':input[name="about"]' => ['value' => About::TITLE_SUMMARY]]],
     ];
     $form['report_gate_events'] = ['#type' => 'checkbox', '#title' => $this->t('Report agent requests to AiFinPay'), '#default_value' => (bool) $config->get('report_gate_events'), '#description' => $this->t('Sends one event per AI-agent request on a protected path (operator, agent class, path pattern, time; never the User-Agent, IP or content) to the AiFinPay dashboard. Needs a connected site and the path patterns registered as resources in AiFinPay.')];
+    $form['traffic_enabled'] = ['#type' => 'checkbox', '#title' => $this->t('Send traffic summaries to AiFinPay'), '#default_value' => ($config->get('traffic_enabled') ?? TRUE) !== FALSE, '#description' => $this->t('Every five minutes, how many visits this site answered: AI agents by company and site section, readers only as a number, and the country if your CDN tells this site. Never addresses, full page addresses or browser details. Shown in your AiFinPay dashboard.')];
     $form['discovery_documents'] = ['#type' => 'checkbox', '#title' => $this->t('Serve /llms.txt and /.well-known/x402.json'), '#default_value' => (bool) ($config->get('discovery_documents') ?? TRUE), '#description' => $this->t('Agent instructions and the x402 discovery document, built from the protected paths above. x402.json is published once a merchant ID is set. Turn off if the site publishes its own files.')];
     $form['discovery_link'] = ['#type' => 'checkbox', '#title' => $this->t('Point agents to /llms.txt from every HTML page'), '#default_value' => (bool) ($config->get('discovery_link') ?? TRUE), '#description' => $this->t('Adds the same Link response header as the AiFinPay gate SDKs.')];
     $form['advanced'] = ['#type' => 'details', '#open' => FALSE, '#title' => $this->t('Advanced'), '#description' => $this->t('A connect code fills Merchant ID, Site ID and Secret reference; changing them by hand unbinds the site.')];
     foreach (['environment', 'merchant_id', 'site_id', 'api_endpoint', 'secret_reference', 'pricing_policy'] as $key) {
       $form['advanced'][$key] = ['#type' => 'textfield', '#title' => ucfirst(str_replace('_', ' ', $key)), '#default_value' => $config->get($key), '#maxlength' => 255];
     }
+    $form['advanced']['traffic_country_header'] = ['#type' => 'textfield', '#title' => $this->t('Country header'), '#default_value' => (string) ($config->get('traffic_country_header') ?? 'CF-IPCountry'), '#maxlength' => 64, '#description' => $this->t('The request header your CDN fills with the visitor country, for traffic summaries. CF-IPCountry on Cloudflare. Leave empty to send no countries.')];
+    $form['advanced']['traffic_network_header'] = ['#type' => 'textfield', '#title' => $this->t('Network header'), '#default_value' => (string) $config->get('traffic_network_header'), '#maxlength' => 64, '#description' => $this->t('The request header your CDN fills with the network number (AS number) of the client, for traffic summaries. Leave empty unless your CDN sets one.')];
     $form['advanced']['logging_level'] = ['#type' => 'select', '#title' => $this->t('Logging level'), '#options' => ['notice' => 'Notice', 'warning' => 'Warning'], '#default_value' => $config->get('logging_level')];
     $form['advanced']['telemetry_enabled'] = ['#type' => 'checkbox', '#title' => $this->t('Opt in to anonymous mock measurements'), '#default_value' => $config->get('telemetry_enabled')];
     $form['advanced']['telemetry_sample'] = ['#type' => 'number', '#min' => 0, '#max' => 100, '#title' => $this->t('Telemetry sample percent'), '#default_value' => $config->get('telemetry_sample')];
@@ -125,6 +128,12 @@ final class SettingsForm extends ConfigFormBase {
     elseif ($aboutField !== '' && in_array($aboutField, $this->fieldNames((string) $form_state->getValue('paid_fields')) ?: ['body'], TRUE)) {
       $form_state->setErrorByName('about_field', $this->t('This field is paid, so it cannot describe the page.'));
     }
+    foreach (['traffic_country_header', 'traffic_network_header'] as $key) {
+      $header = trim((string) $form_state->getValue($key));
+      if ($header !== '' && !preg_match('/^[A-Za-z0-9-]{1,64}$/D', $header)) {
+        $form_state->setErrorByName($key, $this->t('Use a header name, such as CF-IPCountry.'));
+      }
+    }
     $ref = (string) $form_state->getValue('secret_reference');
     if ($ref !== '' && !preg_match('/^[A-Z][A-Z0-9_]{2,100}$/D', $ref)) {
       $form_state->setErrorByName('secret_reference', $this->t('Use an uppercase environment variable reference, never a secret.'));
@@ -153,6 +162,10 @@ final class SettingsForm extends ConfigFormBase {
     }
     foreach (['protected_paths', 'allowed_paths', 'excluded_paths'] as $key) {
       $config->set($key, $this->lines((string) $form_state->getValue($key)));
+    }
+    $config->set('traffic_enabled', (bool) $form_state->getValue('traffic_enabled'));
+    foreach (['traffic_country_header', 'traffic_network_header'] as $key) {
+      $config->set($key, trim((string) $form_state->getValue($key)));
     }
     $choice = (string) $form_state->getValue('exempt_humans');
     $free = $choice === 'proven' ? FreeReaders::PROVEN : ($choice === '1' ? FreeReaders::NAMED : FreeReaders::EVERYONE);

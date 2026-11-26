@@ -21,6 +21,10 @@ use Drupal\aifinpay\Protocol\HumanCheck;
 use Drupal\aifinpay\Protocol\ReaderProof;
 use Drupal\aifinpay\Protocol\ReceiptGate;
 use Drupal\aifinpay\Protocol\SearchBots;
+use Drupal\aifinpay\Protocol\GateIdentity;
+use Drupal\aifinpay\Protocol\ReceiptUse;
+use Drupal\aifinpay\Protocol\Traffic;
+use Drupal\aifinpay\EventSubscriber\TrafficSubscriber;
 use Drupal\aifinpay\Render\About;
 use Drupal\aifinpay\Render\AboutPage;
 use Drupal\aifinpay\Render\HeldPage;
@@ -33,6 +37,9 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
 
 /** Origin enforcement. AI traffic classification is performed at Acquia Edge. */
 final class PaymentMiddleware implements HttpKernelInterface {
+
+  /** Request attribute: the gate's decision as a traffic outcome. */
+  private const OUTCOME = '_aifinpay_outcome';
 
   public function __construct(
     private HttpKernelInterface $httpKernel,
@@ -47,15 +54,60 @@ final class PaymentMiddleware implements HttpKernelInterface {
     private ?SearchBots $searchBots = NULL,
     private ?HumanCheck $humanCheck = NULL,
     private ?AboutPage $aboutPage = NULL,
+    private ?TrafficSubscriber $traffic = NULL,
   ) {}
 
   public function handle(Request $request, int $type = self::MAIN_REQUEST, bool $catch = TRUE): Response {
     $config = $this->configFactory->get('aifinpay.settings')->getRawData();
+    $request->attributes->remove(self::OUTCOME);
     $response = $this->gate($request, $type, $catch, $config);
     if ($type === self::MAIN_REQUEST && !empty($config['enabled']) && ($config['mode'] ?? '') !== 'OFF') {
       $this->announce($response, $config);
+      $this->count($request, $config);
     }
     return $response;
+  }
+
+  /** Leaves this request's count for kernel.terminate; the decision and the response never wait on it. */
+  private function count(Request $request, array $config): void {
+    try {
+      $outcome = $request->attributes->get(self::OUTCOME);
+      $request->attributes->remove(self::OUTCOME);
+      if (!in_array($outcome, Traffic::OUTCOMES, TRUE) || ($config['traffic_enabled'] ?? TRUE) === FALSE
+        || ReceiptUse::credentials(SiteBinding::get()) === NULL
+        || Traffic::edgeCounted($request->headers->all(strtolower(Traffic::EDGE_COUNTED)))) {
+        return;
+      }
+      $who = AgentIdentity::classify($request);
+      $record = ['target' => $request->getPathInfo(), 'ua_class' => $who['ua_class'], 'operator' => $who['operator'], 'outcome' => $outcome];
+      $country = trim((string) ($config['traffic_country_header'] ?? 'CF-IPCountry'));
+      if ($country !== '') {
+        $record['country'] = $request->headers->get($country);
+      }
+      $network = trim((string) ($config['traffic_network_header'] ?? ''));
+      if ($network !== '') {
+        $record['network'] = $request->headers->get($network);
+      }
+      $this->traffic?->hold($request, ['record' => $record, 'mode' => GateIdentity::mode($config),
+        'charge' => GateIdentity::charge($config), 'at' => time()]);
+    }
+    catch (\Throwable) {
+      // Counting never reaches the visitor.
+    }
+  }
+
+  private static function decided(Request $request, string $outcome): void {
+    $request->attributes->set(self::OUTCOME, $outcome);
+  }
+
+  /** A refusal as a traffic outcome, as the gate SDK maps it. */
+  private static function outcomeOf(int $status): string {
+    return match (TRUE) {
+      $status === 402 => 'challenged',
+      $status === 503 => 'error',
+      $status < 400 => 'served',
+      default => 'blocked',
+    };
   }
 
   private function gate(Request $request, int $type, bool $catch, array $config): Response {
@@ -63,7 +115,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $proxyAuthPresent = $request->headers->has('AIFP-Proxy-Auth');
     $gatewayOrigin = $proxyAuthPresent && HostedGateway::originAuthorized($request, $identity);
     if ($type === self::MAIN_REQUEST && $proxyAuthPresent && !$gatewayOrigin) {
-      return $this->deny(403, 'origin_auth_failed');
+      return $this->deny(403, 'origin_auth_failed', $request);
     }
     if ($type !== self::MAIN_REQUEST || empty($config['enabled']) || ($config['mode'] ?? '') === 'OFF') {
       return $this->httpKernel->handle($request, $type, $catch);
@@ -74,10 +126,13 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $proven = $setting === FreeReaders::PROVEN && FreeReaders::missing($config, $keys) === [] && $this->searchBots !== NULL
       && $this->humanCheck !== NULL && ($config['mode'] ?? '') === 'ENFORCE' && ($config['verification'] ?? '') === 'receipt';
     if ($proven && $request->getPathInfo() === HumanCheck::PATH) {
-      return $this->humanCheck->respond($request, (string) $keys['turnstile_secret'], (string) $keys['reader_key'], $identity, time());
+      $answer = $this->humanCheck->respond($request, (string) $keys['turnstile_secret'], (string) $keys['reader_key'], $identity, time());
+      self::decided($request, self::outcomeOf($answer->getStatusCode()));
+      return $answer;
     }
     $document = $this->discoveryDocument($request, $config);
     if ($document !== NULL) {
+      self::decided($request, 'served');
       return $document;
     }
     $mode = $config['mode'] ?? 'SHADOW';
@@ -85,9 +140,10 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $rule = Paths::protected($path, $config);
     // Origins disagree on a dot segment, so no price is safe to quote. A reader still gets the page.
     if ($mode === 'ENFORCE' && Paths::inspect($path)['ambiguous'] && !$this->readsFree($request, $setting, $proven, $keys)) {
-      return $this->deny(400, 'noncanonical_path');
+      return $this->deny(400, 'noncanonical_path', $request);
     }
     if ($rule === NULL) {
+      self::decided($request, 'served');
       $response = $this->httpKernel->handle($request, $type, $catch);
       if ($proven) {
         $this->addQuietCheck($request, $response, (string) $config['turnstile_sitekey'], (string) $keys['reader_key']);
@@ -131,6 +187,9 @@ final class PaymentMiddleware implements HttpKernelInterface {
         // What ENFORCE would have answered, as the gate SDK says it in shadow.
         $response->headers->set('AIFP-Shadow-Status', (string) $wouldBe['status']);
       }
+      self::decided($request, $wouldBe !== NULL
+        ? ($wouldBe['status'] === 200 ? (($wouldBe['event']['kind'] ?? NULL) === 'serve' ? 'paid' : 'served') : self::outcomeOf($wouldBe['status']))
+        : $this->shadowReader($request, $setting));
       $this->record($config, $rule, 'shadow', $classification, $trace, $start, $edge);
       // Report it exactly as the gate SDK does in shadow. Humans are not
       // reported: the report is about agent traffic.
@@ -145,6 +204,7 @@ final class PaymentMiddleware implements HttpKernelInterface {
     // The self-hosted gate serves a reader free whatever the answer below, so an outage or a
     // pending approval stays the agents' problem. Edge decides who is a reader where it is required.
     if ($receipt && ($identity['edge_required'] ?? FALSE) !== TRUE && $this->readsFree($request, $setting, $proven, $keys)) {
+      self::decided($request, 'served');
       $response = $this->httpKernel->handle($request, $type, $catch);
       $response->headers->set('AIFP-Paywall', 'exempt');
       $this->forbidStorage($response);
@@ -161,28 +221,29 @@ final class PaymentMiddleware implements HttpKernelInterface {
     if (!$bound || !in_array($request->getHost(), $identity['trusted_hosts'] ?? [], TRUE)
       || ($receipt ? !ReceiptGate::approved($identity)
         : ($mock ? ($identity['enforce_approved'] ?? FALSE) !== TRUE : !HostedGateway::approved($identity)))) {
-      return $this->deny(503, 'enforcement_not_approved');
+      return $this->deny(503, 'enforcement_not_approved', $request);
     }
     if (($identity['edge_required'] ?? FALSE) === TRUE && !$gatewayOrigin) {
       if (!HostedGateway::edgeReady($identity)) {
-        return $this->deny(503, 'edge_not_validated');
+        return $this->deny(503, 'edge_not_validated', $request);
       }
       if ($edge === NULL) {
-        return $this->deny(403, 'trusted_edge_context_required');
+        return $this->deny(403, 'trusted_edge_context_required', $request);
       }
       if (($edge['rule'] ?? NULL) !== $rule || ($edge['trusted'] ?? FALSE) !== TRUE || $classification === 'UNKNOWN'
         || $edgeDecision === 'OBSERVE'
         || ($edgeDecision === 'BYPASS' && $classification !== 'HUMAN')
         || ($edgeDecision === 'MONETIZE' && !in_array($classification, ['AI_AGENT', 'AUTOMATION'], TRUE))) {
-        return $this->deny(403, 'invalid_edge_decision');
+        return $this->deny(403, 'invalid_edge_decision', $request);
       }
       if ($this->edgeReplay === NULL || !$this->edgeReplay->consume($edge, (int) ($identity['edge_context_ttl'] ?? 90))) {
-        return $this->deny(403, 'edge_context_replay');
+        return $this->deny(403, 'edge_context_replay', $request);
       }
       // Do not leave private trusted context visible to downstream controllers.
       $request->headers->remove('X-AiFinPay-Edge-Context');
       $request->headers->remove('X-AiFinPay-Edge-Signature');
       if ($edgeDecision === 'BYPASS') {
+        self::decided($request, 'served');
         $this->record($config, $rule, 'edge_bypass', $classification, $trace, $start, $edge);
         return $this->httpKernel->handle($request, $type, $catch);
       }
@@ -196,10 +257,10 @@ final class PaymentMiddleware implements HttpKernelInterface {
       if ($mode !== 'ENFORCE' || !HostedGateway::approved($identity)
         || ($config['api_endpoint'] ?? '') !== ($identity['api_origin'] ?? NULL)
         || !in_array($request->getHost(), $identity['trusted_hosts'] ?? [], TRUE)) {
-        return $this->deny(503, 'gateway_not_approved');
+        return $this->deny(503, 'gateway_not_approved', $request);
       }
       if (!in_array($request->getMethod(), ['GET', 'HEAD'], TRUE) || $request->getQueryString() !== NULL) {
-        return $this->deny(400, 'unsupported_gateway_resource');
+        return $this->deny(400, 'unsupported_gateway_resource', $request);
       }
       if ($gatewayOrigin) {
         $request->headers->remove('AIFP-Proxy-Auth');
@@ -211,11 +272,12 @@ final class PaymentMiddleware implements HttpKernelInterface {
         }
         catch (\Throwable) {
           $this->loggerFactory->get('aifinpay')->warning('Hosted gateway unavailable. Trace: @trace', ['@trace' => $trace]);
-          $response = $this->deny(503, 'gateway_unavailable');
+          $response = $this->deny(503, 'gateway_unavailable', $request);
         }
       }
       $this->forbidStorage($response);
       $response->headers->set('X-AiFinPay-Trace', $trace);
+      self::decided($request, $response->isSuccessful() ? 'paid' : self::outcomeOf($response->getStatusCode()));
       $this->record($config, $rule, 'hosted', $classification, $trace, $start, $edge);
       return $response;
     }
@@ -223,28 +285,28 @@ final class PaymentMiddleware implements HttpKernelInterface {
     if ($mode !== 'ENFORCE' || empty($identity['enforce_approved'])
       || ($identity['environment'] ?? 'production') === 'production'
       || ($config['verification'] ?? '') !== 'mock' || empty($identity['local_mock'])) {
-      return $this->deny(503, 'enforcement_not_approved');
+      return $this->deny(503, 'enforcement_not_approved', $request);
     }
     if (!in_array($request->getMethod(), ['GET', 'HEAD'], TRUE)) {
-      return $this->deny(405, 'read_only_resource');
+      return $this->deny(405, 'read_only_resource', $request);
     }
     $endpoint = $config['api_endpoint'] ?? '';
     if ($endpoint !== ($identity['api_endpoint'] ?? NULL) || !preg_match('~^https?://[^/?#@]+$~D', $endpoint)) {
-      return $this->deny(503, 'invalid_api_origin');
+      return $this->deny(503, 'invalid_api_origin', $request);
     }
     if (!in_array($request->getHost(), $identity['trusted_hosts'] ?? [], TRUE)) {
-      return $this->deny(400, 'untrusted_host');
+      return $this->deny(400, 'untrusted_host', $request);
     }
     if ($request->getQueryString() !== NULL) {
-      return $this->deny(400, 'query_resources_not_supported');
+      return $this->deny(400, 'query_resources_not_supported', $request);
     }
     $proof = $request->headers->get('PAYMENT-SIGNATURE', '');
     if (strlen($proof) > 8192) {
-      return $this->deny(400, 'proof_too_large');
+      return $this->deny(400, 'proof_too_large', $request);
     }
     $secret = $identity['secret'] ?? '';
     if (strlen($secret) < 32) {
-      return $this->deny(503, 'credential_missing');
+      return $this->deny(503, 'credential_missing', $request);
     }
     try {
       $api = $this->client->request('POST', $endpoint . '/integration/v1/decision', [
@@ -279,10 +341,11 @@ final class PaymentMiddleware implements HttpKernelInterface {
         }
       }
       $this->record($config, $rule, (string) $status, $classification, $trace, $start, $edge);
+      self::decided($request, self::outcomeOf($status));
     }
     catch (\Throwable) {
       $this->loggerFactory->get('aifinpay')->warning('Adapter unavailable. Trace: @trace', ['@trace' => $trace]);
-      $response = $this->deny(503, 'payment_service_unavailable');
+      $response = $this->deny(503, 'payment_service_unavailable', $request);
     }
     $this->forbidStorage($response);
     $response->headers->set('X-AiFinPay-Trace', $trace);
@@ -303,14 +366,14 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $tier = (string) ($config['tier'] ?? 'standard');
     if ($this->receiptGate === NULL || !isset(ReceiptGate::TIER_WEIGHTS[$tier])
       || !preg_match('/^mrch_[a-z0-9_]{3,32}$/D', (string) ($identity['merchant_id'] ?? ''))) {
-      return $this->deny(503, 'gate_not_configured');
+      return $this->deny(503, 'gate_not_configured', $request);
     }
     try {
       $decision = $this->receiptGate->decide($request, $identity, $rule, $tier, FreeReaders::chosen($config) === FreeReaders::NAMED, time());
     }
     catch (\Throwable) {
       $this->loggerFactory->get('aifinpay')->warning('Receipt gate unavailable. Trace: @trace', ['@trace' => $trace]);
-      $denied = $this->deny(503, 'payment_service_unavailable');
+      $denied = $this->deny(503, 'payment_service_unavailable', $request);
       $denied->headers->set('Retry-After', '30');
       return $denied;
     }
@@ -338,6 +401,9 @@ final class PaymentMiddleware implements HttpKernelInterface {
     $this->forbidStorage($response);
     $response->headers->set('X-AiFinPay-Trace', $trace);
     $this->logDecision($config, $decision, $rule, $trace);
+    self::decided($request, $decision['status'] === 200
+      ? (($decision['event']['kind'] ?? NULL) === 'serve' ? 'paid' : 'served')
+      : self::outcomeOf($decision['status']));
     if ($decision['event'] !== NULL) {
       $event = $decision['event'];
       $this->reportGateEvent($config, $identity, $bound, $rule, $event, $event['kind'], (bool) ($event['verified'] ?? FALSE));
@@ -361,6 +427,28 @@ final class PaymentMiddleware implements HttpKernelInterface {
       return TRUE;
     }
     return $this->searchBots->verify($userAgent, $request->getClientIp()) === 'search';
+  }
+
+  /** What ENFORCE would have done with a reader, for a site that is only watching. */
+  private function shadowReader(Request $request, string $setting): string {
+    if ($setting === FreeReaders::NAMED) {
+      return 'served';
+    }
+    try {
+      if ($setting === FreeReaders::PROVEN) {
+        $keys = ReaderKeys::get();
+        $userAgent = (string) $request->headers->get('User-Agent', '');
+        if (SearchBots::claimedOperator($userAgent) !== NULL || ($keys['reader_key'] !== NULL
+          && (new ReaderProof($keys['reader_key']))->verify($request->headers->get('Cookie'), $userAgent, time()))) {
+          return 'served';
+        }
+      }
+    }
+    catch (\Throwable) {
+      // Watching never breaks a page; the count says what was served.
+      return 'served';
+    }
+    return 'challenged';
   }
 
   /** A browser asking to read a page without any AiFinPay header. */
@@ -516,7 +604,10 @@ final class PaymentMiddleware implements HttpKernelInterface {
     }
   }
 
-  private function deny(int $status, string $error): Response {
+  private function deny(int $status, string $error, ?Request $request = NULL): Response {
+    if ($request !== NULL) {
+      self::decided($request, self::outcomeOf($status));
+    }
     $headers = ['Cache-Control' => 'private, no-store, max-age=0'];
     if ($status === 503) {
       $headers['Retry-After'] = '60';

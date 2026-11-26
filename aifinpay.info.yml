@@ -4,6 +4,7 @@ description: 'Lets AI agents pay for protected pages with AiFinPay. Shadow by de
 package: AiFinPay
 core_version_requirement: ^11
 php: 8.3
+version: '1.4.0'
 configure: aifinpay.settings
 dependencies:
   - drupal:system

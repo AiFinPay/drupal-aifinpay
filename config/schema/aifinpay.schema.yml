@@ -39,3 +39,6 @@ aifinpay.settings:
       sequence: { type: string }
     about: { type: string, label: 'Tell agents what a page is: off, title or title_summary' }
     about_field: { type: string, label: 'Plain-text node field used as the page description instead of the body summary' }
+    traffic_enabled: { type: boolean, label: 'Send five-minute traffic summaries to AiFinPay' }
+    traffic_country_header: { type: string, label: 'Request header with the visitor country set by the site CDN' }
+    traffic_network_header: { type: string, label: 'Request header with the client network (AS number) set by the site CDN' }

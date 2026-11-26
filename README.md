@@ -129,21 +129,41 @@ publishes nothing it did not before: under **Strict** the body summary was held
 back as paid text until now. Turn it on in the form when the summaries are
 meant to be public. A site without the key at all is treated as `off`.
 
-## What the module sends to AiFinPay
+## What the module tells AiFinPay
 
-- The connect code, once, to `POST https://api.aifinpay.io/v1/merchants/connect`.
-- In Enforce: a read of your public site record (`GET /v1/merchants/{id}`) at
-  most every five minutes, and the public receipt-signing keys
+- **Who it is.** Every request it makes with your merchant secret carries
+  `User-Agent: aifinpay-gate-drupal/1.4.0` and
+  `AIFP-Gate: pkg=drupal; ver=1.4.0; platform=drupal11; mode=shadow; charge=agents`:
+  the module version, the Drupal major version, the mode and **Who reads for
+  free** at that moment.
+- **The connect code**, once, to `POST https://api.aifinpay.io/v1/merchants/connect`.
+- **In Enforce:** a read of your public site record (`GET /v1/merchants/{id}`)
+  at most every five minutes, and the public receipt-signing keys
   (`/.well-known/jwks.json`) at most every ten minutes. If AiFinPay cannot be
   reached, the last site record is used for up to a day; after that protected
   paths answer 503 until it is reachable again.
-- In Enforce, on cron: how much of each receipt this site has spent, the
-  receipt id and the units left (`POST /v1/merchants/{id}/receipt-use`, at
-  most 100 per call), so AiFinPay, its dashboard and the paying agent show
-  what this site counted. Never the receipt itself.
-- Only if you opt in: one event per agent request to a protected path
-  (operator, agent class, path pattern, time). Never the User-Agent, IP
-  address or page content.
+- **Receipt use, in Enforce, on cron:** how much of each receipt this site has
+  spent, the receipt id and the units left
+  (`POST /v1/merchants/{id}/receipt-use`, at most 100 per call), so AiFinPay,
+  its dashboard and the paying agent show what this site counted. Never the
+  receipt itself.
+- **Events, only if you opt in** (**Report agent requests**): one event per
+  agent request to a protected path (operator, agent class, path pattern, time).
+- **Traffic summaries, on cron:** one summary per five minutes of traffic
+  (`POST /v1/merchants/{id}/gate-traffic`): how many requests the gate
+  answered, by visitor class (AI crawler, AI agent, reader…) and outcome
+  (served, asked to pay, paid, refused, error); for AI agents also the company
+  and the first part of the path (`/blog`, never `/blog/my-post`); the country,
+  if your CDN puts it in a header (**Country header**, default `CF-IPCountry`);
+  and, for AI agents only, the network number, if your CDN puts it in a header
+  you name (**Network header**). Images, scripts and styles served free are not
+  counted. A request marked `AIFP-Edge-Counted: 1` by an AiFinPay edge gate of
+  your site is not counted twice. Pages served by a page cache or a CDN without
+  reaching Drupal are not counted. To stop it, untick **Send traffic summaries
+  to AiFinPay**; the counts kept so far are deleted on the next cron run.
+
+What never leaves the site: IP addresses, full page paths, query strings,
+User-Agents, cookies, other headers and page content.
 
 ## Overriding from settings.php (optional)
 
@@ -169,7 +189,19 @@ $settings['aifinpay_site'] = [
 drush pmu aifinpay
 ```
 
-Uninstalling deletes the stored secret and the module's tables.
+Uninstalling deletes the stored secret, the traffic counts and the module's tables.
+
+## Tests
+
+The tests are Drupal unit and kernel tests. From a Drupal 11 site that has this
+module and `drupal/core-dev`:
+
+```sh
+SIMPLETEST_DB=sqlite://localhost//tmp/aifinpay.sqlite vendor/bin/phpunit -c web/core web/modules/contrib/aifinpay/tests
+```
+
+`tests/fixtures/gate-identity-v1.json` and `gate-traffic-v1.json` are copies of
+the shared vectors in `AiFinPay/sdk` (`conformance/vectors`); change them there.
 
 ## Security
 

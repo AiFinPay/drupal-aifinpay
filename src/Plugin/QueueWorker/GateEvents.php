@@ -121,7 +121,8 @@ final class GateEvents extends QueueWorkerBase {
   /** The HTTP status of one ingest call, or NULL when AiFinPay was not reached. */
   private function send(array $site, string $merchant, string $secret, array $events): ?int {
     try {
-      $transport = new Transport(\Drupal::httpClient());
+      $transport = \Drupal::service('aifinpay.transport');
+      assert($transport instanceof Transport);
       $response = $transport->request($site, 'POST', '/v1/merchants/' . $merchant . '/gate-events', [
         'headers' => ['AIFP-Merchant-Secret' => $secret, 'Content-Type' => 'application/json', 'Accept' => 'application/json'],
         'body' => json_encode(['events' => $events], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),

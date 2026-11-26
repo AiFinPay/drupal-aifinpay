@@ -24,3 +24,6 @@ paid_fields:
   - body
 about: title_summary
 about_field: ''
+traffic_enabled: true
+traffic_country_header: CF-IPCountry
+traffic_network_header: ''

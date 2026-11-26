@@ -1,7 +1,7 @@
 services:
   aifinpay.middleware:
     class: Drupal\aifinpay\Middleware\PaymentMiddleware
-    arguments: ['@config.factory', '@http_client', '@queue', '@logger.factory', '@aifinpay.hosted_gateway', '@aifinpay.edge_replay', '@aifinpay.receipt_gate', '@aifinpay.merchant_record', '@aifinpay.search_bots', '@aifinpay.human_check', '@aifinpay.about_page']
+    arguments: ['@config.factory', '@http_client', '@queue', '@logger.factory', '@aifinpay.hosted_gateway', '@aifinpay.edge_replay', '@aifinpay.receipt_gate', '@aifinpay.merchant_record', '@aifinpay.search_bots', '@aifinpay.human_check', '@aifinpay.about_page', '@aifinpay.traffic_subscriber']
     tags:
       - { name: http_middleware, priority: 250 }
   aifinpay.about_page:
@@ -9,7 +9,7 @@ services:
     arguments: ['@entity_type.manager', '@path_processor_manager']
   aifinpay.transport:
     class: Drupal\aifinpay\Protocol\Transport
-    arguments: ['@http_client']
+    arguments: ['@http_client', '@config.factory']
   aifinpay.hosted_gateway:
     class: Drupal\aifinpay\Protocol\HostedGateway
     arguments: ['@aifinpay.transport', '@cache.default', '@database']
@@ -39,3 +39,11 @@ services:
   aifinpay.human_check:
     class: Drupal\aifinpay\Protocol\HumanCheck
     arguments: ['@aifinpay.siteverify_client']
+  aifinpay.traffic_store:
+    class: Drupal\aifinpay\Protocol\TrafficStore
+    arguments: ['@database']
+  aifinpay.traffic_subscriber:
+    class: Drupal\aifinpay\EventSubscriber\TrafficSubscriber
+    arguments: ['@aifinpay.traffic_store']
+    tags:
+      - { name: event_subscriber }

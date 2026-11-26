@@ -24,7 +24,7 @@ function aifinpay_requirements($phase): array {
 function aifinpay_uninstall(): void {
   \Drupal::queue('aifinpay_telemetry')->deleteQueue();
   \Drupal::queue('aifinpay_gate_events')->deleteQueue();
-  \Drupal::state()->deleteMultiple(['aifinpay.connection', 'aifinpay.merchant_record', \Drupal\aifinpay\Connect\ReaderKeys::STATE_KEY]);
+  \Drupal::state()->deleteMultiple(['aifinpay.connection', 'aifinpay.merchant_record', \Drupal\aifinpay\Connect\ReaderKeys::STATE_KEY, \Drupal\aifinpay\Protocol\TrafficSender::STATE_KEY]);
 }
 
 function aifinpay_schema(): array {
@@ -61,6 +61,26 @@ function aifinpay_schema(): array {
       'attempts' => ['type' => 'int', 'size' => 'tiny', 'not null' => TRUE, 'default' => 0],
     ],
     'primary key' => ['receipt_id'],
+  ], 'aifinpay_traffic_windows' => [
+    'description' => 'Five-minute traffic windows: when each opened and the one it follows; no PII.',
+    'fields' => [
+      'opened' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+      'after' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+      'mode' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'charge' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+    ],
+    'primary key' => ['opened'],
+    'unique keys' => ['after' => ['after']],
+  ], 'aifinpay_traffic' => [
+    'description' => 'Request counts per traffic window: class, outcome, operator, first path segment, country, network; no paths, addresses or user agents.',
+    'fields' => [
+      'opened' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE],
+      'tbl' => ['type' => 'varchar_ascii', 'length' => 16, 'not null' => TRUE],
+      'v' => ['type' => 'varchar_ascii', 'length' => 40, 'not null' => TRUE],
+      'rest' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE, 'default' => ''],
+      'n' => ['type' => 'int', 'size' => 'big', 'not null' => TRUE, 'default' => 0],
+    ],
+    'primary key' => ['opened', 'tbl', 'v', 'rest'],
   ]];
 }
 
@@ -144,6 +164,29 @@ function aifinpay_update_11007(): void {
   }
 }
 
+/**
+ * Adds traffic summaries: the two tally tables, on by default, country from CF-IPCountry.
+ */
+function aifinpay_update_11008(): void {
+  $schema = \Drupal::database()->schema();
+  foreach (['aifinpay_traffic_windows', 'aifinpay_traffic'] as $table) {
+    if (!$schema->tableExists($table)) {
+      $schema->createTable($table, aifinpay_schema()[$table]);
+    }
+  }
+  $config = \Drupal::configFactory()->getEditable('aifinpay.settings');
+  if (!is_bool($config->get('traffic_enabled'))) {
+    $config->set('traffic_enabled', TRUE);
+  }
+  if (!is_string($config->get('traffic_country_header'))) {
+    $config->set('traffic_country_header', 'CF-IPCountry');
+  }
+  if (!is_string($config->get('traffic_network_header'))) {
+    $config->set('traffic_network_header', '');
+  }
+  $config->save();
+}
+
 function aifinpay_cron(): void {
   $site = \Drupal\aifinpay\Connect\SiteBinding::get();
   if (($site['credential_source'] ?? '') === 'connect_code') {
@@ -161,5 +204,5 @@ function aifinpay_cron(): void {
       // What is held stays for the next cron run.
     }
   }
+  \Drupal\aifinpay\Protocol\TrafficSender::cron($site, \Drupal::config('aifinpay.settings')->getRawData(), time());
 }
-
